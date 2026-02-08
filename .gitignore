@@ -1,0 +1,11 @@
+# Build output
+*.ssd
+
+# Assembler binary
+beebasm
+
+# Claude Code
+.claude/
+
+# macOS
+.DS_Store
