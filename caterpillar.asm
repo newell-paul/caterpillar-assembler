@@ -1,6 +1,7 @@
 ; ============================================================================
-; Caterpillar - BBC Micro 6502 Assembly
+; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version)
 ; Converted from BBC BASIC by Paul Newell with help from Claude Code (c) 2026
+; Game engine only - title/menu/scores handled by BASIC in MODE 7
 ; ============================================================================
 
 ; --- MOS Entry Points ---
@@ -10,7 +11,7 @@ OSBYTE  = &FFF4
 OSWORD  = &FFF1
 
 ; --- Zero Page Variables ---
-; Using &60-&8F for game variables
+; Using &60-&9F for game variables
 scr_addr_lo = &60      ; screen address (low byte) - calc_screen_addr result
 scr_addr_hi = &61      ; screen address (high byte)
 sprite_ptr_lo = &62    ; sprite data pointer (low byte)
@@ -61,6 +62,7 @@ acorn_state  = &9B     ; 0=waiting for left, 1=waiting for right, 2=done
 acorn_pending = &9C    ; column for pending acorn draw (0=none)
 bonus_phase   = &9D    ; 0=normal play, 1=bonus round (empty+acorns after completion)
 transition_phase = &9E  ; 0=normal play, 1=transitioning between seasons (empty map + name)
+game_result   = &9F    ; return code: 0=crash, 1=completed
 
 ; --- Constants ---
 ; Pixel coordinate boundaries for caterpillar movement
@@ -78,18 +80,28 @@ ORG &1900
 GUARD &3000
 
 .start
-    ; Initialise variables (equivalent to line 30: T%=0:S%=0)
-    LDA #0
-    STA score_lo
-    STA score_hi
-    STA hiscore_lo
-    STA hiscore_hi
-    JMP title_screen
+    ; Save stack pointer for clean return to BASIC
+    TSX
+    STX saved_sp
+    JMP game_init
+
+; ============================================================================
+; Section: Return to BASIC
+; ============================================================================
+.return_to_basic
+    LDX saved_sp
+    TXS               ; restore stack pointer (clean regardless of call depth)
+    RTS               ; returns to BASIC's CALL
 
 ; ============================================================================
 ; Section: Game initialisation (equivalent to lines 50-200)
 ; ============================================================================
 .game_init
+    ; *FX200,3 - disable escape key
+    LDA #200
+    LDX #3
+    JSR OSBYTE
+
     ; MODE 2
     LDA #22
     JSR OSWRCH
@@ -97,9 +109,6 @@ GUARD &3000
     JSR OSWRCH
 
     ; VDU 23;8202;0;0;0; - disable cursor
-    ; BASIC semicolons send 16-bit words: 23; = 23,0  8202; = 10,32  0; = 0,0 (x3)
-    ; So the full sequence is: 23, 0, 10, 32, 0, 0, 0, 0, 0, 0 (10 bytes)
-    ; VDU 23 expects 9 parameter bytes after the command byte
     LDA #23 : JSR OSWRCH
     LDA #0  : JSR OSWRCH     ; char 0 = CRTC register programming
     LDA #10 : JSR OSWRCH     ; register 10 (cursor start)
@@ -531,14 +540,12 @@ GUARD &3000
     RTS
 
 ; --- enter_transition ---
-; Enter season transition: load 64-row empty map
-; Season name is drawn by draw_map_row at row 4 and scrolls down from top
+; Enter season transition: 96 empty scroll rows (no map data needed)
+; Season name is drawn by draw_map_row at row 32
 .enter_transition
     LDA #1 : STA transition_phase
-    LDA #LO(map_empty) : STA map_ptr_lo : STA map_base_lo
-    LDA #HI(map_empty) : STA map_ptr_hi : STA map_base_hi
     LDA #0 : STA map_row_idx
-    LDA #96 : STA season_rows   ; 3 pages of empty scrolling
+    LDA #76 : STA season_rows   ; empty scrolling for transition
     RTS
 
 ; --- draw_season_name ---
@@ -630,9 +637,21 @@ GUARD &3000
 ;   &40-&53: acorn at column N-64
 ;   &FF: end of row
 .draw_map_row
-    ; VDU 4 - text cursor mode
+    ; VDU 4 - text cursor mode (needed for row clear VDU 28/12)
     LDA #4
     JSR OSWRCH
+
+    ; During transition, skip item parsing (no map data to read)
+    LDA transition_phase
+    BEQ dmr_has_items
+    ; Transition row: check for season name at row 32, then scroll
+    LDA map_row_idx
+    CMP #32
+    BNE dmr_skip_name
+    JSR draw_season_name
+.dmr_skip_name
+    JMP dmr_no_name
+.dmr_has_items
 
     ; Walk through map data
     LDY #0
@@ -744,13 +763,6 @@ GUARD &3000
     ADC #0
     STA map_ptr_hi
 
-    ; During transition, draw season name at row 32 (top of 2nd page)
-    LDA transition_phase
-    BEQ dmr_no_name
-    LDA map_row_idx
-    CMP #32
-    BNE dmr_no_name
-    JSR draw_season_name
 .dmr_no_name
 
     ; Clear row 30 before scroll to prevent CRTC wrap artifacts
@@ -956,48 +968,15 @@ GUARD &3000
     STA hiscore_hi
 .no_new_hiscore
 
-    ; G$ = GET$ (line 880) - wait for keypress
-    JSR OSRDCH
-
-    ; Fall through to title screen (GOTO 890)
-    JMP title_screen
+    ; Return to BASIC with result code 0 (crash)
+    LDA #0
+    STA game_result
+    JMP return_to_basic
 
 ; ============================================================================
-; Section: Completion screen (all 4 seasons cleared)
+; Section: Completion (all 4 seasons cleared)
 ; ============================================================================
 .show_completed
-    ; Switch to text cursor mode
-    LDA #4 : JSR OSWRCH
-
-    ; Set flashing text colour: COLOUR 9 (flashing red/cyan)
-    LDA #17 : JSR OSWRCH
-    LDA #9 : JSR OSWRCH
-
-    ; TAB(5,14) "COMPLETED!"
-    LDA #5 : LDX #14 : JSR do_tab
-    LDX #LO(str_completed)
-    LDY #HI(str_completed)
-    JSR print_string
-
-    ; Set flashing text colour: COLOUR 15 (flashing white/black)
-    LDA #17 : JSR OSWRCH
-    LDA #15 : JSR OSWRCH
-
-    ; TAB(3,16) "PRESS ANY KEY" (centred: (20-13)/2 = 3)
-    LDA #3 : LDX #16 : JSR do_tab
-    LDX #LO(str_anykey)
-    LDY #HI(str_anykey)
-    JSR print_string
-
-    ; Switch back to graphics cursor
-    LDA #5 : JSR OSWRCH
-
-    ; Flush keyboard buffer (*FX15,1)
-    LDA #15 : LDX #1 : JSR OSBYTE
-
-    ; Wait for keypress
-    JSR OSRDCH
-
     ; Update high score if needed
     LDA hiscore_lo
     CMP score_lo
@@ -1007,194 +986,10 @@ GUARD &3000
     LDA score_lo : STA hiscore_lo
     LDA score_hi : STA hiscore_hi
 .sc_no_hiscore
-    JMP title_screen
-
-; ============================================================================
-; Section: Title Screen (lines 890-1080)
-; ============================================================================
-.title_screen
-    ; CLS (line 890)
-    LDA #12
-    JSR OSWRCH
-
-    ; MODE 7 (line 900)
-    LDA #22
-    JSR OSWRCH
-    LDA #7
-    JSR OSWRCH
-
-    ; VDU 23;8202;0;0;0; - disable cursor (line 905)
-    ; VDU 23 needs 9 parameter bytes (10 total OSWRCH calls)
-    LDA #23 : JSR OSWRCH
-    LDA #0  : JSR OSWRCH     ; char 0 = CRTC register programming
-    LDA #10 : JSR OSWRCH     ; register 10 (cursor start)
-    LDA #32 : JSR OSWRCH     ; value 32 (cursor disabled)
-    LDA #0  : JSR OSWRCH
-    LDA #0  : JSR OSWRCH
-    LDA #0  : JSR OSWRCH
-    LDA #0  : JSR OSWRCH
-    LDA #0  : JSR OSWRCH
-    LDA #0  : JSR OSWRCH
-
-    ; *FX200,3 - disable escape key (line 25)
-    LDA #200
-    LDX #3
-    JSR OSBYTE
-
-    ; Print title lines
-    ; TAB(12,2) CHR$129 CHR$141 "CATERPILLAR" (line 910)
-    LDA #12 : LDX #2 : JSR do_tab
-    LDA #129 : JSR OSWRCH     ; red alphanumeric
-    LDA #141 : JSR OSWRCH     ; double height (top)
-    LDX #LO(str_title)
-    LDY #HI(str_title)
-    JSR print_string
-
-    ; TAB(12,3) CHR$129 CHR$141 "CATERPILLAR" (line 920)
-    LDA #12 : LDX #3 : JSR do_tab
-    LDA #129 : JSR OSWRCH     ; red alphanumeric
-    LDA #141 : JSR OSWRCH     ; double height (bottom)
-    LDX #LO(str_title)
-    LDY #HI(str_title)
-    JSR print_string
-
-    ; TAB(1,6) CHR$130 "Guide the caterpillar through the" (line 930)
-    LDA #1 : LDX #6 : JSR do_tab
-    LDA #130 : JSR OSWRCH     ; green
-    LDX #LO(str_line1)
-    LDY #HI(str_line1)
-    JSR print_string
-
-    ; TAB(0,7) CHR$130 "mushroom patch..." (line 940)
-    LDA #0 : LDX #7 : JSR do_tab
-    LDA #130 : JSR OSWRCH
-    LDX #LO(str_line2)
-    LDY #HI(str_line2)
-    JSR print_string
-
-    ; TAB(0,8) CHR$130 "work your way..." (line 950)
-    LDA #0 : LDX #8 : JSR do_tab
-    LDA #130 : JSR OSWRCH
-    LDX #LO(str_line3)
-    LDY #HI(str_line3)
-    JSR print_string
-
-    ; TAB(0,9) CHR$130 "You score points..." (line 960)
-    LDA #0 : LDX #9 : JSR do_tab
-    LDA #130 : JSR OSWRCH
-    LDX #LO(str_line4)
-    LDY #HI(str_line4)
-    JSR print_string
-
-    ; TAB(0,10) CHR$130 "on the way." (line 970)
-    LDA #0 : LDX #10 : JSR do_tab
-    LDA #130 : JSR OSWRCH
-    LDX #LO(str_line5)
-    LDY #HI(str_line5)
-    JSR print_string
-
-    ; TAB(9,12) CHR$131 "Leaves.....5 points" (line 980)
-    LDA #9 : LDX #12 : JSR do_tab
-    LDA #131 : JSR OSWRCH     ; yellow
-    LDX #LO(str_score1)
-    LDY #HI(str_score1)
-    JSR print_string
-
-    ; TAB(9,13) CHR$131 "Twigs.....10 points" (line 990)
-    LDA #9 : LDX #13 : JSR do_tab
-    LDA #131 : JSR OSWRCH
-    LDX #LO(str_score2)
-    LDY #HI(str_score2)
-    JSR print_string
-
-    ; TAB(9,14) CHR$131 "Flowers...15 points" (line 1000)
-    LDA #9 : LDX #14 : JSR do_tab
-    LDA #131 : JSR OSWRCH
-    LDX #LO(str_score3)
-    LDY #HI(str_score3)
-    JSR print_string
-
-    ; TAB(9,15) CHR$131 "Apples....20 points" (line 1010)
-    LDA #9 : LDX #15 : JSR do_tab
-    LDA #131 : JSR OSWRCH
-    LDX #LO(str_score4)
-    LDY #HI(str_score4)
-    JSR print_string
-
-    ; TAB(8,16) CHR$131 CHR$136 "Acorns....50 points" (line 1020)
-    LDA #8 : LDX #16 : JSR do_tab
-    LDA #131 : JSR OSWRCH     ; yellow
-    LDA #136 : JSR OSWRCH     ; flash
-    LDX #LO(str_score5)
-    LDY #HI(str_score5)
-    JSR print_string
-
-    ; TAB(14,18) CHR$133 CHR$136 "[ Z M ]" (line 1030)
-    LDA #14 : LDX #18 : JSR do_tab
-    LDA #133 : JSR OSWRCH     ; magenta
-    LDA #136 : JSR OSWRCH     ; flash
-    LDX #LO(str_keys)
-    LDY #HI(str_keys)
-    JSR print_string
-
-    ; TAB(12,20) CHR$134 "HIGH SCORE " T% (line 1040)
-    LDA #12 : LDX #20 : JSR do_tab
-    LDA #134 : JSR OSWRCH     ; cyan
-    LDX #LO(str_hiscore)
-    LDY #HI(str_hiscore)
-    JSR print_string
-    LDA hiscore_lo
-    LDX hiscore_hi
-    JSR print_decimal
-
-    ; TAB(12,22) CHR$134 "YOUR SCORE " S% (line 1050)
-    LDA #12 : LDX #22 : JSR do_tab
-    LDA #134 : JSR OSWRCH     ; cyan
-    LDX #LO(str_yourscore)
-    LDY #HI(str_yourscore)
-    JSR print_string
-    LDA score_lo
-    LDX score_hi
-    JSR print_decimal
-
-    ; Version number
-    LDA #15 : LDX #4 : JSR do_tab
-    LDA #132 : JSR OSWRCH     ; blue
-    LDX #LO(str_version)
-    LDY #HI(str_version)
-    JSR print_string
-
-    ; TAB(5,24) CHR$131 CHR$136 "PRESS ANY KEY TO START." (line 1060)
-    LDA #5 : LDX #24 : JSR do_tab
-    LDA #131 : JSR OSWRCH     ; yellow
-    LDA #136 : JSR OSWRCH     ; flash
-    LDX #LO(str_presskey)
-    LDY #HI(str_presskey)
-    JSR print_string
-
-    ; S%=0 (line 1070)
-    LDA #0
-    STA score_lo
-    STA score_hi
-
-    ; *FX21,0 - flush keyboard buffer (line 1075)
-    LDA #21
-    LDX #0
-    JSR OSBYTE
-
-    ; G$=GET$ - wait for keypress (line 1080)
-    JSR OSRDCH
-
-    ; Seed PRNG from timer at moment of keypress
-    JSR read_time
-    LDA osword_blk
-    ORA #1              ; ensure non-zero
-    STA rng_lo
-    LDA osword_blk+1
-    STA rng_hi
-
-    ; GOTO 50 (line 1080)
-    JMP game_init
+    ; Return to BASIC with result code 1 (completed)
+    LDA #1
+    STA game_result
+    JMP return_to_basic
 
 ; ============================================================================
 ; Section: Helper Subroutines
@@ -1314,139 +1109,6 @@ GUARD &3000
     SBC temp2
     JMP rn_mod_loop
 .rn_done
-    RTS
-
-; --- print_decimal ---
-; Print 16-bit value as decimal (no leading zeros)
-; Entry: A=low byte, X=high byte
-.print_decimal
-    STA temp0           ; value low
-    STX temp1           ; value high
-    ; We'll convert by repeated division by 10
-    ; Maximum 16-bit value = 65535, so max 5 digits
-    LDA #0
-    STA temp3           ; leading zero flag (0 = suppress)
-
-    ; 10000s digit
-    LDX #0
-.pd_10000
-    LDA temp0
-    CMP #LO(10000)
-    LDA temp1
-    SBC #HI(10000)
-    BCC pd_10000_done
-    ; Subtract 10000
-    SEC
-    LDA temp0
-    SBC #LO(10000)
-    STA temp0
-    LDA temp1
-    SBC #HI(10000)
-    STA temp1
-    INX
-    JMP pd_10000
-.pd_10000_done
-    TXA
-    BNE pd_10000_print
-    LDA temp3
-    BNE pd_10000_print
-    JMP pd_1000         ; skip leading zero
-.pd_10000_print
-    TXA
-    CLC
-    ADC #'0'
-    JSR OSWRCH
-    LDA #1
-    STA temp3           ; no longer suppressing zeros
-
-    ; 1000s digit
-.pd_1000
-    LDX #0
-.pd_1000_loop
-    LDA temp0
-    CMP #LO(1000)
-    LDA temp1
-    SBC #HI(1000)
-    BCC pd_1000_done
-    SEC
-    LDA temp0
-    SBC #LO(1000)
-    STA temp0
-    LDA temp1
-    SBC #HI(1000)
-    STA temp1
-    INX
-    JMP pd_1000_loop
-.pd_1000_done
-    TXA
-    BNE pd_1000_print
-    LDA temp3
-    BNE pd_1000_print
-    JMP pd_100
-.pd_1000_print
-    TXA
-    CLC
-    ADC #'0'
-    JSR OSWRCH
-    LDA #1
-    STA temp3
-
-    ; 100s digit
-.pd_100
-    LDX #0
-.pd_100_loop
-    LDA temp0
-    CMP #100
-    BCC pd_100_done
-    SEC
-    SBC #100
-    STA temp0
-    INX
-    JMP pd_100_loop
-.pd_100_done
-    TXA
-    BNE pd_100_print
-    LDA temp3
-    BNE pd_100_print
-    JMP pd_10
-.pd_100_print
-    TXA
-    CLC
-    ADC #'0'
-    JSR OSWRCH
-    LDA #1
-    STA temp3
-
-    ; 10s digit
-.pd_10
-    LDX #0
-.pd_10_loop
-    LDA temp0
-    CMP #10
-    BCC pd_10_done
-    SEC
-    SBC #10
-    STA temp0
-    INX
-    JMP pd_10_loop
-.pd_10_done
-    TXA
-    BNE pd_10_print
-    LDA temp3
-    BNE pd_10_print
-    JMP pd_1
-.pd_10_print
-    TXA
-    CLC
-    ADC #'0'
-    JSR OSWRCH
-
-    ; 1s digit (always print)
-.pd_1
-    LDA temp0
-    CLC
-    ADC #'0'
-    JSR OSWRCH
     RTS
 
 ; ============================================================================
@@ -1816,12 +1478,16 @@ GUARD &3000
 ; Section: Data Tables
 ; ============================================================================
 
+; --- Saved stack pointer for return to BASIC ---
+.saved_sp
+    EQUB 0
+
 ; --- Sprite save buffer (40 bytes for 5 byte-columns x 8 rows) ---
 .save_buffer
     SKIP 40
 
 ; --- Body ring buffer data ---
-; Screen address and scanline for each body segment (6 slots)
+; Screen address and scanline for each body segment (5 slots)
 .body_scr_lo
     SKIP BODY_MAX
 .body_scr_hi
@@ -2384,33 +2050,6 @@ GUARD &3000
     EQUB &02, &0B, &FF                    ; row 62: mushrooms col 2 + col 11
     EQUB &FF                              ; row 63: empty
 
-; --- Empty map for season transitions (96 rows = 3 pages) ---
-.map_empty
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 0-3
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 4-7
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 8-11
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 12-15
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 16-19
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 20-23
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 24-27
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 28-31
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 32-35
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 36-39
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 40-43
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 44-47
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 48-51
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 52-55
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 56-59
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 60-63
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 64-67
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 68-71
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 72-75
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 76-79
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 80-83
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 84-87
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 88-91
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 92-95
-
 ; --- Bonus map: 32 acorn rows + 32 empty rows (cool-down) ---
 ; Leading empty page handled by transition ("Bonus" text)
 .map_bonus
@@ -2464,61 +2103,7 @@ GUARD &3000
 .season_name_hi
     EQUB HI(str_autumn), HI(str_winter), HI(str_spring), HI(str_summer), HI(str_bonus)
 
-; --- Title screen strings (null-terminated) ---
-.str_title
-    EQUS "CATERPILLAR", 0
-
-.str_line1
-    EQUS "Guide the caterpillar through the", 0
-
-.str_line2
-    EQUS "mushroom patch. You start in autumn and", 0
-
-.str_line3
-    EQUS "work your way through the 4 seasons.", 0
-
-.str_line4
-    EQUS "You score points by eating the food", 0
-
-.str_line5
-    EQUS "on the way.", 0
-
-.str_score1
-    EQUS "Leaves.....5 points", 0
-
-.str_score2
-    EQUS "Twigs.....10 points", 0
-
-.str_score3
-    EQUS "Flowers...15 points", 0
-
-.str_score4
-    EQUS "Apples....20 points", 0
-
-.str_score5
-    EQUS "Acorns....50 points", 0
-
-.str_keys
-    EQUS "[ Z M ]", 0
-
-.str_hiscore
-    EQUS "HIGH SCORE ", 0
-
-.str_yourscore
-    EQUS "YOUR SCORE ", 0
-
-.str_version
-    EQUS "v0.8.21", 0
-
-.str_presskey
-    EQUS "PRESS ANY KEY TO START.", 0
-
-.str_completed
-    EQUS "COMPLETED!", 0
-
-.str_anykey
-    EQUS "PRESS ANY KEY", 0
-
+; --- In-game strings (null-terminated) ---
 .str_autumn
     EQUS "Autumn", 0
 .str_winter
@@ -2535,4 +2120,6 @@ GUARD &3000
 ; ============================================================================
 ; Save to disc image
 ; ============================================================================
-SAVE "CATERP", start, end, start
+SAVE "GAME", start, end, start
+PUTBASIC "caterpillar.bas", "CATER"
+PUTTEXT "!BOOT", "!BOOT", &FFFF

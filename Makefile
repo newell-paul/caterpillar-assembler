@@ -1,7 +1,6 @@
 BEEBASM = ./beebasm
 SRC = caterpillar.asm
 OUT = caterpillar.ssd
-BOOT = CATERP
 
 JSBEEB_DIR = $(HOME)/.local/share/jsbeeb
 JSBEEB_URL = http://localhost:5173/\?disc1=caterpillar.ssd\&autoboot
@@ -10,8 +9,8 @@ JSBEEB_URL = http://localhost:5173/\?disc1=caterpillar.ssd\&autoboot
 
 all: $(OUT)
 
-$(OUT): $(SRC)
-	$(BEEBASM) -i $(SRC) -do $(OUT) -boot $(BOOT) -v
+$(OUT): $(SRC) caterpillar.bas !BOOT
+	$(BEEBASM) -i $(SRC) -do $(OUT) -opt 3 -v
 
 run: $(OUT)
 	@ln -sf $(CURDIR)/$(OUT) $(JSBEEB_DIR)/public/discs/$(OUT)
