@@ -68,7 +68,7 @@ game_result   = &9F    ; return code: 0=crash, 1=completed
 ; Pixel coordinate boundaries for caterpillar movement
 PX_LEFT_BOUND  = 25     ; minimum X pixel (left edge of playfield)
 PX_RIGHT_BOUND = 134    ; maximum X pixel (right edge, sprite is 8+1px wide)
-PX_CAT_INIT_X  = 75     ; starting X pixel position (gx=600/8)
+PX_CAT_INIT_X  = 76     ; starting X pixel position (must be even for 2px movement)
 PX_CAT_INIT_Y  = 200    ; starting Y pixel position (row 25 = 7th from bottom)
 MOVE_ACCUM     = 164    ; fractional speed: 164/256 * 50Hz ≈ 32px/sec
 BODY_MAX       = 5      ; max body segments in ring buffer (eviction at row 30)
@@ -259,7 +259,7 @@ GUARD &3000
 ; ============================================================================
 ; Section: PROCcaterpillar (lines 380-470)
 ; Pixel-based movement with direct screen memory sprite drawing
-; 1-pixel movement with sub-byte shifting for even/odd pixel positions
+; 2-pixel movement (always byte-aligned, no odd sprite needed)
 ; Speed: fractional accumulator, ~32px/sec at 50Hz
 ; ============================================================================
 .proc_caterpillar
@@ -318,10 +318,10 @@ GUARD &3000
     CPX #&FF
     BNE pc_no_left
     LDA cat_px_x
-    CMP #PX_LEFT_BOUND+1    ; must be > left bound
+    CMP #PX_LEFT_BOUND+2    ; must be > left bound + 1
     BCC pc_no_left
-    BEQ pc_no_left
-    DEC cat_px_x            ; move 1 pixel left
+    DEC cat_px_x            ; move 2 pixels left
+    DEC cat_px_x
 .pc_no_left
 
     ; Check M key (right): INKEY(-102)
@@ -332,9 +332,10 @@ GUARD &3000
     CPX #&FF
     BNE pc_no_right
     LDA cat_px_x
-    CMP #PX_RIGHT_BOUND     ; must be < right bound
+    CMP #PX_RIGHT_BOUND-1   ; must be < right bound - 1
     BCS pc_no_right
-    INC cat_px_x            ; move 1 pixel right
+    INC cat_px_x            ; move 2 pixels right
+    INC cat_px_x
 .pc_no_right
 
 .pc_draw_head
@@ -1346,15 +1347,11 @@ GUARD &3000
     RTS
 
 ; --- draw_sprite ---
-; Draw 8x8 sprite, selecting even or odd variant based on cat_px_x bit 0
+; Draw 8x8 sprite (always even-aligned with 2px movement)
 ; Entry: scr_addr_lo/hi = top-left screen address
 ;        temp0 = starting scanline (py AND 7)
 ; Clobbers: A, X, Y, temp0, temp1
 .draw_sprite
-    LDA cat_px_x
-    AND #1
-    BNE draw_sprite_odd
-    ; Fall through to even draw
 
 ; --- draw_sprite_even ---
 ; Even pixel position: 4 bytes/row, full overwrite
@@ -1408,71 +1405,6 @@ GUARD &3000
     BNE de_row_loop
     RTS
 
-; --- draw_sprite_odd ---
-; Odd pixel position: 5 bytes/row with edge masking
-; Byte 0: preserve background left pixel, set right from sprite
-; Bytes 1-3: full sprite data
-; Byte 4: preserve background right pixel, set left from sprite
-.draw_sprite_odd
-    LDX #0              ; sprite data index
-    LDA #8
-    STA temp1
-.do_row_loop
-    ; Byte 0: read-modify-write (keep left pixel = bits 7,5,3,1)
-    LDY #0
-    LDA (scr_addr_lo),Y    ; read background
-    AND #&AA                ; keep left pixel (mask = &AA)
-    ORA sprite_data_odd,X   ; merge sprite right pixel
-    STA (scr_addr_lo),Y
-    INX
-    ; Bytes 1-3: full overwrite
-    LDY #8
-    LDA sprite_data_odd,X
-    STA (scr_addr_lo),Y
-    INX
-    LDY #16
-    LDA sprite_data_odd,X
-    STA (scr_addr_lo),Y
-    INX
-    LDY #24
-    LDA sprite_data_odd,X
-    STA (scr_addr_lo),Y
-    INX
-    ; Byte 4: read-modify-write (keep right pixel = bits 6,4,2,0)
-    LDY #32
-    LDA (scr_addr_lo),Y    ; read background
-    AND #&55                ; keep right pixel (mask = &55)
-    ORA sprite_data_odd,X   ; merge sprite left pixel
-    STA (scr_addr_lo),Y
-    INX
-    ; Advance to next scanline
-    INC temp0
-    LDA temp0
-    AND #7
-    STA temp0
-    BNE do_same_row
-    CLC
-    LDA scr_addr_lo
-    ADC #LO(633)
-    STA scr_addr_lo
-    LDA scr_addr_hi
-    ADC #HI(633)
-    STA scr_addr_hi
-    CMP #&80
-    BCC do_no_wrap
-    SEC
-    SBC #&50
-    STA scr_addr_hi
-.do_no_wrap
-    JMP do_next
-.do_same_row
-    INC scr_addr_lo
-    BNE do_next
-    INC scr_addr_hi
-.do_next
-    DEC temp1
-    BNE do_row_loop
-    RTS
 
 ; ============================================================================
 ; Section: Data Tables
@@ -1542,31 +1474,6 @@ GUARD &3000
     EQUB &14, &14, &28, &28
     ; Row 7: 11011011
     EQUB &3C, &14, &28, &3C
-
-; --- Odd-aligned caterpillar sprite: shifted right by 1 pixel ---
-; 8 rows x 5 bytes = 40 bytes
-; Pixel 0 goes into RIGHT pixel of byte 0 (left pixel = background)
-; Pixel 7 goes into LEFT pixel of byte 4 (right pixel = background)
-; Bytes 0 and 4 contain only the sprite's pixel contribution (other pixel bits = 0)
-; The draw routine merges these with the background using AND/OR masking
-.sprite_data_odd
-    ; Row 0: pixels 1,0,0,1,1,0,0,1 shifted right by 1
-    ; Byte0=(_,P0), Byte1=(P1,P2), Byte2=(P3,P4), Byte3=(P5,P6), Byte4=(P7,_)
-    EQUB &14, &00, &3C, &00, &28
-    ; Row 1: pixels 0,1,0,1,1,0,1,0
-    EQUB &00, &28, &3C, &14, &00
-    ; Row 2: pixels 0,0,0,1,1,0,0,0
-    EQUB &00, &00, &3C, &00, &00
-    ; Row 3: pixels 1,1,0,1,1,0,1,1
-    EQUB &14, &28, &3C, &14, &28
-    ; Row 4: (same as row 1)
-    EQUB &00, &28, &3C, &14, &00
-    ; Row 5: (same as row 3)
-    EQUB &14, &28, &3C, &14, &28
-    ; Row 6: (same as row 1)
-    EQUB &00, &28, &3C, &14, &00
-    ; Row 7: (same as row 3)
-    EQUB &14, &28, &3C, &14, &28
 
 ; --- MODE 2 row address lookup table ---
 ; row_table[n] = &3000 + n * 640
