@@ -154,6 +154,8 @@ GUARD &3000
     STA body_rdidx       ; read index starts at 0
     STA bonus_phase      ; not in bonus round
     STA transition_phase ; not transitioning
+    LDA #1 : STA collision_on   ; collision on by default
+    LDA #0 : STA collision_key_prev
     LDA #2 : STA scroll_div : STA scroll_count  ; initial scroll speed
     JSR enter_transition ; show "Autumn", load empty transition map
 
@@ -243,8 +245,28 @@ GUARD &3000
     BCS round_over          ; C=1 means round is over
 
 .skip_season_check
-    ; PROCcheckhit (collision detection)
-    JSR proc_checkhit
+    ; Check C key toggle (INKEY -83) with edge detection
+    LDA #129
+    LDX #(256-83)
+    LDY #&FF
+    JSR OSBYTE
+    CPX #&FF
+    BNE ck_not_pressed
+    ; C is pressed - was it pressed last frame?
+    LDA collision_key_prev
+    BNE ck_debounce         ; already held, don't toggle again
+    ; Key-down edge: toggle collision_on
+    LDA collision_on
+    EOR #1
+    STA collision_on
+    LDA #1
+    STA collision_key_prev
+    JMP ck_done
+.ck_not_pressed
+    LDA #0
+    STA collision_key_prev
+.ck_debounce
+.ck_done
 
 .skip_slow_path
     JMP game_loop
@@ -349,8 +371,9 @@ GUARD &3000
     LDA cat_px_x : STA prev_px_x
     LDA scroll_py : STA prev_scroll_py
 
-    ; Save background under new position, then draw head
+    ; Save background under new position, check collision, then draw head
     JSR save_background
+    JSR proc_checkhit       ; check BEFORE drawing (reads save_buffer)
     JSR prep_sprite_addr    ; recalc (save modifies scr_addr)
     JSR draw_sprite
     LDA #1
@@ -795,100 +818,90 @@ GUARD &3000
     RTS
 
 ; ============================================================================
-; Section: PROCcheckhit (lines 740-810)
-; Uses OSWORD 9 to read pixel colour at caterpillar check point
-; Converts pixel coords to graphics coords for OSWORD 9
-; Check point: 4 pixels right of sprite left edge (centre-ish)
+; Section: PROCcheckhit - direct screen memory collision detection
+; Scans ALL 40 save_buffer bytes (5 byte-cols x 8 rows) for any non-black
+; left pixel. Detects items at any position under the sprite — left edge,
+; centre, or right edge — so collision works when approaching from any side.
+; Called from proc_caterpillar after save_background, before draw_sprite.
 ; ============================================================================
 .proc_checkhit
-    ; Convert pixel coords to graphics coords for OSWORD 9
-    ; gx = (cat_px_x + 4) * 8   (check 4 pixels right of sprite left edge)
-    ; gy = (255 - cat_px_y) * 4
-    LDA cat_px_x
-    CLC
-    ADC #4
-    LDX #0
-    STX osword_blk+1    ; high byte = 0
-    ASL A : ROL osword_blk+1  ; *2
-    ASL A : ROL osword_blk+1  ; *4
-    ASL A : ROL osword_blk+1  ; *8
-    STA osword_blk      ; gx low
-
-    ; gy = (255 - cat_px_y) * 4
-    LDA cat_px_y
-    EOR #&FF            ; 255 - py
-    LDX #0
-    STX osword_blk+3    ; high byte = 0
-    ASL A : ROL osword_blk+3  ; *2
-    ASL A : ROL osword_blk+3  ; *4
-    STA osword_blk+2    ; gy low
-
-    ; Call OSWORD 9 - read pixel
-    LDA #9
-    LDX #LO(osword_blk)
-    LDY #HI(osword_blk)
-    JSR OSWORD
-
-    ; Result in osword_blk+4 (logical colour)
-    LDA osword_blk+4
-
-    ; Check for colour 2 (mushroom/crash) FIRST since it ends the round
-    CMP #2
+    ; Skip collision check if toggled off
+    LDA collision_on
+    BNE pch_active
+    RTS
+.pch_active
+    ; Scan all 40 save_buffer bytes for any non-black left pixel
+    LDX #39
+    LDA #0
+.pch_scan
+    ORA save_buffer,X
+    DEX
+    BPL pch_scan
+    ; A = OR of all 40 bytes; if zero, nothing under sprite
+    AND #&AA            ; isolate left pixel bits
+    BNE pch_has_colour
+    RTS                 ; all black = no collision
+.pch_has_colour
+    ; Reverse lookup: find logical colour from left pixel bits
+    LDX #15
+.pch_find
+    CMP colour_left,X
+    BEQ pch_found
+    DEX
+    BPL pch_find
+    RTS                 ; no match (mixed colours from OR, rare)
+.pch_found
+    ; X = logical colour (0-15)
+    ; Check for colour 2 (mushroom/crash) FIRST
+    CPX #2
     BNE not_crash
     JMP proc_crash
 .not_crash
-
-    ; Store colour for lookup
-    STA temp0
-
-    ; Check colour 1 (leaves, 5pts)
-    CMP #1
+    ; Eat the item: zero save_buffer, clear from screen via VDU, then score
+    TXA : PHA           ; save colour on stack
+    ; Zero save_buffer so future background restore writes black
+    LDA #0 : LDX #39
+.clear_sb
+    STA save_buffer,X
+    DEX
+    BPL clear_sb
+    ; Clear item from screen using VDU (MOS handles CRTC scroll)
+    ; Print 2 spaces covering sprite's full width (16px = 2 text cols)
+    LDA #4 : JSR OSWRCH          ; VDU 4 - text cursor mode
+    LDA #0 : JSR do_colour       ; text colour 0 (black)
+    LDA cat_px_x
+    LSR A : LSR A : LSR A        ; A = text column of sprite left edge
+    LDX #25                      ; text row (caterpillar visual row)
+    JSR do_tab                   ; VDU 31, col, 25
+    LDA #32 : JSR OSWRCH         ; space 1 (left half)
+    LDA #32 : JSR OSWRCH         ; space 2 (right half)
+    LDA #5 : JSR OSWRCH          ; VDU 5 - back to graphics cursor
+    ; Restore colour and score
+    PLA : TAX
+    CPX #1
     BNE not_col1
-    LDX #LO(sound_hit1)
-    LDY #HI(sound_hit1)
-    LDA #5
+    LDX #LO(sound_hit1) : LDY #HI(sound_hit1) : LDA #5
     JMP add_score_and_sound
 .not_col1
-
-    LDA temp0
-    ; Check colour 7 (twigs, 10pts)
-    CMP #7
+    CPX #7
     BNE not_col7
-    LDX #LO(sound_hit2)
-    LDY #HI(sound_hit2)
-    LDA #10
+    LDX #LO(sound_hit2) : LDY #HI(sound_hit2) : LDA #10
     JMP add_score_and_sound
 .not_col7
-
-    LDA temp0
-    ; Check colour 5 (flowers, 15pts)
-    CMP #5
+    CPX #5
     BNE not_col5
-    LDX #LO(sound_hit3)
-    LDY #HI(sound_hit3)
-    LDA #15
+    LDX #LO(sound_hit3) : LDY #HI(sound_hit3) : LDA #15
     JMP add_score_and_sound
 .not_col5
-
-    LDA temp0
-    ; Check colour 6 (apples, 20pts)
-    CMP #6
+    CPX #6
     BNE not_col6
-    LDX #LO(sound_hit4)
-    LDY #HI(sound_hit4)
-    LDA #20
+    LDX #LO(sound_hit4) : LDY #HI(sound_hit4) : LDA #20
     JMP add_score_and_sound
 .not_col6
-
-    LDA temp0
-    ; Check colour 11 (acorns, 50pts)
-    CMP #11
+    CPX #11
     BNE no_hit
-    LDX #LO(sound_hit5)
-    LDY #HI(sound_hit5)
-    LDA #50
+    LDX #LO(sound_hit5) : LDY #HI(sound_hit5) : LDA #50
     JMP add_score_and_sound
-
 .no_hit
     RTS
 
@@ -1414,6 +1427,12 @@ GUARD &3000
 .saved_sp
     EQUB 0
 
+; --- Collision toggle (C key) ---
+.collision_on
+    EQUB 1              ; 1=collision active, 0=disabled
+.collision_key_prev
+    EQUB 0              ; previous C key state (for edge detection)
+
 ; --- Sprite save buffer (40 bytes for 5 byte-columns x 8 rows) ---
 .save_buffer
     SKIP 40
@@ -1453,27 +1472,27 @@ GUARD &3000
     EQUB HI(body_save_3)
     EQUB HI(body_save_4)
 
-; --- Pre-encoded caterpillar sprite for MODE 2, colour 6 (cyan) ---
+; --- Pre-encoded caterpillar sprite for MODE 2, colour 4 (blue) ---
 ; Even-aligned: 8 rows x 4 bytes = 32 bytes (sprite starts at left pixel of byte)
 ; Derived from char 240 bitmap: 153, 90, 24, 219, 90, 219, 90, 219
-; Colour 6 left pixel = &28, right pixel = &14, both = &3C, neither = &00
+; Colour 4 left pixel = &20, right pixel = &10, both = &30, neither = &00
 .sprite_data_even
-    ; Row 0: 10011001 → (L,_),(_,L),(L,_),(_,L)
-    EQUB &28, &14, &28, &14
-    ; Row 1: 01011010 → (_,L),(_,L),(L,_),(L,_)
-    EQUB &14, &14, &28, &28
-    ; Row 2: 00011000 → (_,_),(_,L),(L,_),(_,_)
-    EQUB &00, &14, &28, &00
-    ; Row 3: 11011011 → (L,L),(_,L),(L,_),(L,L)
-    EQUB &3C, &14, &28, &3C
+    ; Row 0: 10011001 → (L,_),(_,R),(L,_),(_,R)
+    EQUB &20, &10, &20, &10
+    ; Row 1: 01011010 → (_,R),(_,R),(L,_),(L,_)
+    EQUB &10, &10, &20, &20
+    ; Row 2: 00011000 → (_,_),(_,R),(L,_),(_,_)
+    EQUB &00, &10, &20, &00
+    ; Row 3: 11011011 → (L,R),(_,R),(L,_),(L,R)
+    EQUB &30, &10, &20, &30
     ; Row 4: 01011010
-    EQUB &14, &14, &28, &28
+    EQUB &10, &10, &20, &20
     ; Row 5: 11011011
-    EQUB &3C, &14, &28, &3C
+    EQUB &30, &10, &20, &30
     ; Row 6: 01011010
-    EQUB &14, &14, &28, &28
+    EQUB &10, &10, &20, &20
     ; Row 7: 11011011
-    EQUB &3C, &14, &28, &3C
+    EQUB &30, &10, &20, &30
 
 ; --- MODE 2 row address lookup table ---
 ; row_table[n] = &3000 + n * 640

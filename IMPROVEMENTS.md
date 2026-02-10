@@ -12,18 +12,12 @@
 
 ## High Priority Improvements
 
-### Performance (If Needed)
-- [ ] **Direct screen collision detection** (Tier 2.1)
-  - Replace OSWORD 9 with direct screen memory read
-  - ~500-900 cycles saved per check
-  - Medium effort, medium risk
-
 ### Code Quality
-- [ ] **Remove dead code** (Tier 1.1)
-  - `colour_left`/`colour_right` tables (32 bytes)
+- [ ] **Remove dead code**
   - `random`/`random_n` routines (30 bytes)
   - `play_sound`/`do_gcol` (14 bytes)
-  - Total: ~76 bytes saved
+  - `colour_right` table (16 bytes) — `colour_left` now used by collision detection
+  - Total: ~60 bytes saved
 
 ### Map System
 - [ ] **Seeded procedural generation** (Optional Major Refactor)
