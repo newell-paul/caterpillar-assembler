@@ -1,47 +1,39 @@
 # Caterpillar Improvements
 
-## Completed
+### Improvements
+- [ ] Revisit sounds
+- [ ] Bonus Round seasons surrounded by acorns
 
-### v0.9.0 - MODE 7 BASIC Wrapper
-- [x] **BASIC/Assembly split** - BASIC handles MODE 7 title/menu/scores, assembly handles MODE 2 game engine
-- [x] Title screen, game over, game completed screens in BASIC
-- [x] Clean return-to-BASIC via saved stack pointer (TSX/TXS)
-- [x] Game result code at &9F (0=crash, 1=completed)
-- [x] Removed title_screen, print_decimal, and title strings from assembly
-- [x] ~300 fewer assembly lines, menus easy to edit in BASIC
-
-## High Priority Improvements
-
-### Code Quality
-- [ ] **Remove dead code**
-  - `random`/`random_n` routines (30 bytes)
-  - `play_sound`/`do_gcol` (14 bytes)
-  - `colour_right` table (16 bytes) — `colour_left` now used by collision detection
-  - Total: ~60 bytes saved
+### Code Quality (v0.9.6 - size optimizations, 3032 → 2644 bytes)
+- [x] **Remove dead code** (-95 bytes)
+  - `random`/`random_n`, `play_sound`, `do_gcol`, `colour_right`, `sound_buzz`, `sound_fruit`
+- [x] **Tail-call optimizations** (-6 bytes)
+  - 6x `JSR+RTS` → `JMP` in helpers and draw_map_row
+- [x] **Zero-page memset loop** (-20 bytes)
+  - Replace 13 individual STA with two tight loops (&66-&75, &95-&9E)
+- [x] **Table-driven VDU sequences** (-43 bytes)
+  - `send_vdu_seq` subroutine + data tables for init and row clear
+- [x] **Extract scanline advance subroutine** (-112 bytes)
+  - 4 duplicated 39-byte copies → shared `advance_scanline`
+- [x] **Pair-format map compression** (-112 bytes)
+  - Changed from row-terminated streams to (row, type_col) pairs
+  - Empty rows cost 0 bytes (was 1 each, 165 eliminated)
+  - Bonus cool-down: 80 → 33 bytes
 
 ### Map System
 - [ ] **Seeded procedural generation** (Optional Major Refactor)
-  - Replace 273+ lines of static map data with seeded LFSR
+  - Replace static map data with seeded LFSR
   - Deterministic patterns (learnable like Flappy Bird)
-  - Data: 4 seeds (8 bytes) vs 273 lines
   - Only consider if static maps become unmaintainable
 
 ## Known Issues
 
 ### Body Trail Flicker
 - Last segment flickers while others are solid
-- Attempted fixes: overlap detection (failed), BODY_MAX=6 (broke game)
-- Likely needs delayed-erase with pending flag (complex)
-- **Decision: Accept for now, low priority**
-
-## Deferred / Low Priority
-
-- Empty map row optimization (&FF compression)
-- Factoring VDU sequences into subroutines
-- All Tier 3 refactors (only if performance becomes critical)
+- Try and move caterpillar up one
 
 ---
 
 ## Notes
-- Performance is currently acceptable (50Hz capable, ~16Hz gameplay)
+- Performance is currently acceptable ~16Hz gameplay)
 - Only optimize if new features demand it

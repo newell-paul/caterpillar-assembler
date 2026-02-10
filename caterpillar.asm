@@ -1,6 +1,6 @@
 ; ============================================================================
 ; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version)
-; Converted from BBC BASIC by Paul Newell with help from Claude Code (c) 2026
+; Converted from BBC BASIC by Paul Newell with heavily steered assistance from Claude Code (c) 2026
 ; Game engine only - title/menu/scores handled by BASIC in MODE 7
 ; ============================================================================
 
@@ -102,60 +102,40 @@ GUARD &3000
     LDX #3
     JSR OSBYTE
 
-    ; MODE 2
-    LDA #22
-    JSR OSWRCH
-    LDA #2
-    JSR OSWRCH
+    ; Wait for vsync before mode switch to avoid transition glitch
+    LDA #19 : JSR OSBYTE
 
-    ; VDU 23;8202;0;0;0; - disable cursor
-    LDA #23 : JSR OSWRCH
-    LDA #0  : JSR OSWRCH     ; char 0 = CRTC register programming
-    LDA #10 : JSR OSWRCH     ; register 10 (cursor start)
-    LDA #32 : JSR OSWRCH     ; value 32 (cursor disabled)
-    LDA #0  : JSR OSWRCH
-    LDA #0  : JSR OSWRCH
-    LDA #0  : JSR OSWRCH
-    LDA #0  : JSR OSWRCH
-    LDA #0  : JSR OSWRCH
-    LDA #0  : JSR OSWRCH
+    ; MODE 2 + disable cursor + VDU 5 (table-driven)
+    LDX #LO(vdu_init_data)
+    LDY #HI(vdu_init_data)
+    LDA #13
+    JSR send_vdu_seq
 
     ; Define characters 240-250 (lines 70-170)
     JSR define_characters
 
-    ; VDU 5 - use graphics cursor for text (line 180)
-    LDA #5
-    JSR OSWRCH
-
     ; Initialise caterpillar position in pixel coords
-    ; Caterpillar starting pixel position
     LDA #PX_CAT_INIT_X
     STA cat_px_x
     LDA #PX_CAT_INIT_Y
     STA cat_px_y
-    LDA #0
-    STA move_timer       ; frame counter for speed control
-    STA anim_frame       ; global frame counter
-    STA scroll_py        ; reset scroll tracking
-    STA prev_scroll_py
 
-    ; Reset score and sprite state for this round
+    ; Zero game state: &66-&75 (skipping hiscore &76-&77, rng &78-&79)
     LDA #0
-    STA score_lo
-    STA score_hi
-    STA sprite_drawn     ; no sprite on screen yet
-
-    ; Initialize season system
-    LDA #0
-    STA season
-    STA prev_season
-    STA body_count       ; no body segments yet
-    STA body_wridx       ; write index starts at 0
-    STA body_rdidx       ; read index starts at 0
-    STA bonus_phase      ; not in bonus round
-    STA transition_phase ; not transitioning
-    LDA #1 : STA collision_on   ; collision on by default
-    LDA #0 : STA collision_key_prev
+    LDX #(&75 - &66)
+.zi_loop1
+    STA &66,X
+    DEX
+    BPL zi_loop1
+    ; Zero body/phase state: &95-&9E
+    LDX #(&9E - &95)
+.zi_loop2
+    STA &95,X
+    DEX
+    BPL zi_loop2
+    ; A is still 0 from loop
+    STA collision_key_prev
+    LDA #1 : STA collision_on
     LDA #2 : STA scroll_div : STA scroll_count  ; initial scroll speed
     JSR enter_transition ; show "Autumn", load empty transition map
 
@@ -487,32 +467,7 @@ GUARD &3000
     BCC eob_no_ptr_wrap
     INC copy_ptr_hi
 .eob_no_ptr_wrap
-    ; Advance to next scanline
-    INC temp0
-    LDA temp0
-    AND #7
-    STA temp0
-    BNE eob_same_row
-    ; Crossed char row boundary: add 633
-    CLC
-    LDA scr_addr_lo
-    ADC #LO(633)
-    STA scr_addr_lo
-    LDA scr_addr_hi
-    ADC #HI(633)
-    STA scr_addr_hi
-    CMP #&80
-    BCC eob_no_wrap
-    SEC
-    SBC #&50
-    STA scr_addr_hi
-.eob_no_wrap
-    JMP eob_next
-.eob_same_row
-    INC scr_addr_lo
-    BNE eob_next
-    INC scr_addr_hi
-.eob_next
+    JSR advance_scanline
     DEC temp1
     BNE eob_row_loop
 
@@ -583,8 +538,8 @@ GUARD &3000
     LDX #4
 .dsn_got_idx
     STX temp0
-    ; COLOUR 3 (yellow, non-flashing)
-    LDA #3
+    ; COLOUR 6 (cyan, same as caterpillar - no collision conflict)
+    LDA #6
     JSR do_colour
     ; TAB(7, 1) - centred near top of screen
     LDA #7 : LDX #1 : JSR do_tab
@@ -595,8 +550,7 @@ GUARD &3000
     LDA season_name_hi,X
     TAY
     LDX temp1
-    JSR print_string
-    RTS
+    JMP print_string
 
 ; --- check_season ---
 ; Read system timer and determine current season (0-3)
@@ -677,17 +631,17 @@ GUARD &3000
     JMP dmr_no_name
 .dmr_has_items
 
-    ; Walk through map data
+    ; Walk through map data (pair format: row, type_col)
     LDY #0
 .dmr_loop
-    LDA (map_ptr_lo),Y
-    CMP #&FF
-    BNE dmr_not_done
-    JMP dmr_done_items
-.dmr_not_done
-    INY                 ; pre-advance Y for next item
-    ; Save Y on stack (OSWRCH calls may clobber it conceptually, but
-    ; we use temp vars to hold map position)
+    LDA (map_ptr_lo),Y      ; peek at row number
+    CMP map_row_idx
+    BEQ dmr_row_match        ; row matches, parse items
+    JMP dmr_done_items        ; not this row (or &FF sentinel)
+.dmr_row_match
+    INY
+    LDA (map_ptr_lo),Y      ; type_col byte
+    INY
     STY temp3
 
     ; Determine item type
@@ -702,22 +656,22 @@ GUARD &3000
     ; COLOUR 2 (green)
     LDA #2
     JSR do_colour
-    ; TAB(col,1) CHR$243 CHR$244
+    ; TAB(col,1) CHR$242 CHR$243
     LDA temp0
     LDX #1
     JSR do_tab
-    LDA #243
+    LDA #242
     JSR OSWRCH
-    LDA #244
+    LDA #243
     JSR OSWRCH
     ; COLOUR 3 (yellow)
     LDA #3
     JSR do_colour
-    ; TAB(col,2) CHR$245
+    ; TAB(col,2) CHR$244
     LDA temp0
     LDX #2
     JSR do_tab
-    LDA #245
+    LDA #244
     JSR OSWRCH
     JMP dmr_next_item
 
@@ -756,20 +710,20 @@ GUARD &3000
     ; COLOUR 11 (bright yellow)
     LDA #11
     JSR do_colour
-    ; TAB(col,1) CHR$249
+    ; TAB(col,1) CHR$248
     LDA temp0
     LDX #1
     JSR do_tab
-    LDA #249
+    LDA #248
     JSR OSWRCH
     ; COLOUR 10 (bright green)
     LDA #10
     JSR do_colour
-    ; TAB(col,2) CHR$250
+    ; TAB(col,2) CHR$249
     LDA temp0
     LDX #2
     JSR do_tab
-    LDA #250
+    LDA #249
     JSR OSWRCH
 
 .dmr_next_item
@@ -777,8 +731,7 @@ GUARD &3000
     JMP dmr_loop
 
 .dmr_done_items
-    ; Advance map_ptr past this row (Y points past &FF terminator)
-    INY                 ; Y = bytes consumed (items + terminator)
+    ; Advance map_ptr by Y (bytes consumed: 2 per item, 0 if empty row)
     TYA
     CLC
     ADC map_ptr_lo
@@ -789,15 +742,11 @@ GUARD &3000
 
 .dmr_no_name
 
-    ; Clear row 30 before scroll to prevent CRTC wrap artifacts
-    ; VDU 28 text window + VDU 12 CLS is much faster than 20 spaces
-    LDA #28 : JSR OSWRCH          ; VDU 28 - define text window
-    LDA #0  : JSR OSWRCH          ; left col = 0
-    LDA #30 : JSR OSWRCH          ; bottom row = 30
-    LDA #19 : JSR OSWRCH          ; right col = 19
-    LDA #30 : JSR OSWRCH          ; top row = 30
-    LDA #12 : JSR OSWRCH          ; VDU 12 - CLS (clears window only)
-    LDA #26 : JSR OSWRCH          ; VDU 26 - restore default window
+    ; Clear row 30 before scroll (table-driven)
+    LDX #LO(vdu_row_clear)
+    LDY #HI(vdu_row_clear)
+    LDA #7
+    JSR send_vdu_seq
 
     ; VDU 30 : VDU 11 - home cursor then cursor up (triggers hardware scroll)
     LDA #30
@@ -813,9 +762,7 @@ GUARD &3000
 
     ; VDU 5 - graphics cursor mode
     LDA #5
-    JSR OSWRCH
-
-    RTS
+    JMP OSWRCH
 
 ; ============================================================================
 ; Section: PROCcheckhit - direct screen memory collision detection
@@ -852,9 +799,12 @@ GUARD &3000
     RTS                 ; no match (mixed colours from OR, rare)
 .pch_found
     ; X = logical colour (0-15)
-    ; Check for colour 2 (mushroom/crash) FIRST
+    ; Check for colour 2 (mushroom cap) or 3 (mushroom stem) = crash
     CPX #2
+    BEQ is_crash
+    CPX #3
     BNE not_crash
+.is_crash
     JMP proc_crash
 .not_crash
     ; Eat the item: zero save_buffer, clear from screen via VDU, then score
@@ -893,11 +843,11 @@ GUARD &3000
     LDX #LO(sound_hit3) : LDY #HI(sound_hit3) : LDA #15
     JMP add_score_and_sound
 .not_col5
-    CPX #6
-    BNE not_col6
+    CPX #4
+    BNE not_col4
     LDX #LO(sound_hit4) : LDY #HI(sound_hit4) : LDA #20
     JMP add_score_and_sound
-.not_col6
+.not_col4
     CPX #11
     BNE no_hit
     LDX #LO(sound_hit5) : LDY #HI(sound_hit5) : LDA #50
@@ -909,9 +859,14 @@ GUARD &3000
 ; Entry: X/Y = sound block address, A = points to add
 .add_score_and_sound
     PHA                 ; save points
+    ; Hit-stop: freeze 2 frames for kinetic "gulp" feel
+    STX temp0 : STY temp1
+    LDA #19 : JSR OSBYTE
+    LDA #19 : JSR OSBYTE
+    LDX temp0 : LDY temp1
     ; Play sound
     LDA #7
-    JSR OSWORD          ; X/Y already set
+    JSR OSWORD          ; X/Y restored
     ; Add points to score
     PLA
     CLC
@@ -1009,24 +964,13 @@ GUARD &3000
 ; Section: Helper Subroutines
 ; ============================================================================
 
-; --- do_gcol ---
-; VDU 18,A,X - set graphics colour
-; Entry: A=action, X=colour
-.do_gcol
-    PHA
-    LDA #18 : JSR OSWRCH
-    PLA     : JSR OSWRCH
-    TXA     : JSR OSWRCH
-    RTS
-
 ; --- do_colour ---
 ; VDU 17,A - set text colour
 ; Entry: A=colour
 .do_colour
     PHA
     LDA #17 : JSR OSWRCH
-    PLA     : JSR OSWRCH
-    RTS
+    PLA     : JMP OSWRCH
 
 ; --- do_tab ---
 ; VDU 31,A,X - TAB(A,X)
@@ -1035,7 +979,22 @@ GUARD &3000
     PHA
     LDA #31 : JSR OSWRCH
     PLA     : JSR OSWRCH
-    TXA     : JSR OSWRCH
+    TXA     : JMP OSWRCH
+
+; --- send_vdu_seq ---
+; Send A bytes from table at X/Y via OSWRCH
+; Entry: X=lo, Y=hi of data, A=byte count
+.send_vdu_seq
+    STX temp0
+    STY temp1
+    STA temp2
+    LDY #0
+.svs_loop
+    LDA (temp0),Y
+    JSR OSWRCH
+    INY
+    CPY temp2
+    BNE svs_loop
     RTS
 
 ; --- print_string ---
@@ -1054,12 +1013,35 @@ GUARD &3000
 .ps_done
     RTS
 
-; --- play_sound ---
-; Play sound from data table
-; Entry: X=lo, Y=hi of 8-byte sound block
-.play_sound
-    LDA #7
-    JSR OSWORD
+; --- advance_scanline ---
+; Advance scr_addr to next scanline, handling char row boundary (+633)
+; and screen memory wrap (&8000 -> &3000)
+; Entry/Exit: scr_addr_lo/hi, temp0 (scanline within char row)
+.advance_scanline
+    INC temp0
+    LDA temp0
+    AND #7
+    STA temp0
+    BNE as_same_row
+    ; Crossed char row boundary: add 633
+    CLC
+    LDA scr_addr_lo
+    ADC #LO(633)
+    STA scr_addr_lo
+    LDA scr_addr_hi
+    ADC #HI(633)
+    STA scr_addr_hi
+    CMP #&80
+    BCC as_done
+    SEC
+    SBC #&50
+    STA scr_addr_hi
+    RTS
+.as_same_row
+    INC scr_addr_lo
+    BNE as_done
+    INC scr_addr_hi
+.as_done
     RTS
 
 ; --- reset_time ---
@@ -1074,8 +1056,7 @@ GUARD &3000
     LDA #2
     LDX #LO(osword_blk)
     LDY #HI(osword_blk)
-    JSR OSWORD
-    RTS
+    JMP OSWORD
 
 ; --- read_time ---
 ; Read system timer (OSWORD 1), result in osword_blk (5 bytes)
@@ -1083,53 +1064,13 @@ GUARD &3000
     LDA #1
     LDX #LO(osword_blk)
     LDY #HI(osword_blk)
-    JSR OSWORD
-    RTS
-
-; --- random ---
-; 16-bit Galois LFSR PRNG
-; Updates rng_lo/rng_hi, returns raw value in A (low byte)
-.random
-    LDA rng_lo
-    ASL A
-    STA rng_lo          ; store shifted low byte
-    ROL rng_hi
-    BCC random_no_eor
-    ; Feedback polynomial for maximal-length 16-bit LFSR
-    LDA rng_lo
-    EOR #&2D
-    STA rng_lo
-    LDA rng_hi
-    EOR #&B4
-    STA rng_hi
-.random_no_eor
-    LDA rng_lo
-    RTS
-
-; --- random_n ---
-; Return random number 0..N-1 in A
-; Entry: A = N (max value + 1)
-; Uses repeated subtraction (modulo) for small N values
-.random_n
-    STA temp2           ; save N
-    JSR random          ; get random byte in A
-    ; Simple modulo by repeated subtraction
-    ; First, ensure we use the full random byte
-    AND #&7F            ; use 0-127 range to reduce bias
-.rn_mod_loop
-    CMP temp2
-    BCC rn_done         ; A < N, done
-    SEC
-    SBC temp2
-    JMP rn_mod_loop
-.rn_done
-    RTS
+    JMP OSWORD
 
 ; ============================================================================
 ; Section: Character Definitions
 ; ============================================================================
 .define_characters
-    ; Define characters 240-250 using VDU 23 sequences
+    ; Define characters 240-249 using VDU 23 sequences
     ; Each character: VDU 23, char_num, b0, b1, b2, b3, b4, b5, b6, b7
     LDX #0              ; index into char_data
     LDA #240            ; starting character number
@@ -1151,7 +1092,7 @@ GUARD &3000
     ; Next character
     INC temp0
     LDA temp0
-    CMP #251            ; done after char 250
+    CMP #250            ; done after char 249
     BNE defchar_loop
     RTS
 
@@ -1270,33 +1211,7 @@ GUARD &3000
     LDA (scr_addr_lo),Y
     STA save_buffer,X
     INX
-    ; Advance to next scanline
-    INC temp0
-    LDA temp0
-    AND #7
-    STA temp0
-    BNE sb_same_row
-    ; Crossed char row boundary: add 640-7 = 633
-    CLC
-    LDA scr_addr_lo
-    ADC #LO(633)
-    STA scr_addr_lo
-    LDA scr_addr_hi
-    ADC #HI(633)
-    STA scr_addr_hi
-    ; Wrap if past end of screen memory (&8000 -> &3000)
-    CMP #&80
-    BCC sb_no_wrap
-    SEC
-    SBC #&50
-    STA scr_addr_hi
-.sb_no_wrap
-    JMP sb_next
-.sb_same_row
-    INC scr_addr_lo
-    BNE sb_next
-    INC scr_addr_hi
-.sb_next
+    JSR advance_scanline
     DEC temp1
     BNE sb_row_loop
     RTS
@@ -1331,30 +1246,7 @@ GUARD &3000
     LDA save_buffer,X
     STA (scr_addr_lo),Y
     INX
-    INC temp0
-    LDA temp0
-    AND #7
-    STA temp0
-    BNE rb_same_row
-    CLC
-    LDA scr_addr_lo
-    ADC #LO(633)
-    STA scr_addr_lo
-    LDA scr_addr_hi
-    ADC #HI(633)
-    STA scr_addr_hi
-    CMP #&80
-    BCC rb_no_wrap
-    SEC
-    SBC #&50
-    STA scr_addr_hi
-.rb_no_wrap
-    JMP rb_next
-.rb_same_row
-    INC scr_addr_lo
-    BNE rb_next
-    INC scr_addr_hi
-.rb_next
+    JSR advance_scanline
     DEC temp1
     BNE rb_row_loop
     RTS
@@ -1389,31 +1281,7 @@ GUARD &3000
     LDA sprite_data_even,X
     STA (scr_addr_lo),Y
     INX
-    ; Advance to next scanline
-    INC temp0
-    LDA temp0
-    AND #7
-    STA temp0
-    BNE de_same_row
-    CLC
-    LDA scr_addr_lo
-    ADC #LO(633)
-    STA scr_addr_lo
-    LDA scr_addr_hi
-    ADC #HI(633)
-    STA scr_addr_hi
-    CMP #&80
-    BCC de_no_wrap
-    SEC
-    SBC #&50
-    STA scr_addr_hi
-.de_no_wrap
-    JMP de_next
-.de_same_row
-    INC scr_addr_lo
-    BNE de_next
-    INC scr_addr_hi
-.de_next
+    JSR advance_scanline
     DEC temp1
     BNE de_row_loop
     RTS
@@ -1422,6 +1290,12 @@ GUARD &3000
 ; ============================================================================
 ; Section: Data Tables
 ; ============================================================================
+
+; --- VDU sequence data ---
+.vdu_init_data     ; MODE 2 + cursor off + VDU 5
+    EQUB 22, 2, 23, 0, 10, 32, 0, 0, 0, 0, 0, 0, 5
+.vdu_row_clear     ; VDU 28,0,30,19,30 + CLS + restore window
+    EQUB 28, 0, 30, 19, 30, 12, 26
 
 ; --- Saved stack pointer for return to BASIC ---
 .saved_sp
@@ -1472,98 +1346,40 @@ GUARD &3000
     EQUB HI(body_save_3)
     EQUB HI(body_save_4)
 
-; --- Pre-encoded caterpillar sprite for MODE 2, colour 4 (blue) ---
+; --- Pre-encoded caterpillar sprite for MODE 2, colour 6 (cyan) ---
 ; Even-aligned: 8 rows x 4 bytes = 32 bytes (sprite starts at left pixel of byte)
 ; Derived from char 240 bitmap: 153, 90, 24, 219, 90, 219, 90, 219
-; Colour 4 left pixel = &20, right pixel = &10, both = &30, neither = &00
+; Colour 6 left pixel = &28, right pixel = &14, both = &3C, neither = &00
 .sprite_data_even
     ; Row 0: 10011001 → (L,_),(_,R),(L,_),(_,R)
-    EQUB &20, &10, &20, &10
+    EQUB &28, &14, &28, &14
     ; Row 1: 01011010 → (_,R),(_,R),(L,_),(L,_)
-    EQUB &10, &10, &20, &20
+    EQUB &14, &14, &28, &28
     ; Row 2: 00011000 → (_,_),(_,R),(L,_),(_,_)
-    EQUB &00, &10, &20, &00
+    EQUB &00, &14, &28, &00
     ; Row 3: 11011011 → (L,R),(_,R),(L,_),(L,R)
-    EQUB &30, &10, &20, &30
+    EQUB &3C, &14, &28, &3C
     ; Row 4: 01011010
-    EQUB &10, &10, &20, &20
+    EQUB &14, &14, &28, &28
     ; Row 5: 11011011
-    EQUB &30, &10, &20, &30
+    EQUB &3C, &14, &28, &3C
     ; Row 6: 01011010
-    EQUB &10, &10, &20, &20
+    EQUB &14, &14, &28, &28
     ; Row 7: 11011011
-    EQUB &30, &10, &20, &30
+    EQUB &3C, &14, &28, &3C
 
 ; --- MODE 2 row address lookup table ---
 ; row_table[n] = &3000 + n * 640
 ; 32 entries (char rows 0-31)
 .row_table_lo
-    EQUB LO(&3000 + 0*640)
-    EQUB LO(&3000 + 1*640)
-    EQUB LO(&3000 + 2*640)
-    EQUB LO(&3000 + 3*640)
-    EQUB LO(&3000 + 4*640)
-    EQUB LO(&3000 + 5*640)
-    EQUB LO(&3000 + 6*640)
-    EQUB LO(&3000 + 7*640)
-    EQUB LO(&3000 + 8*640)
-    EQUB LO(&3000 + 9*640)
-    EQUB LO(&3000 + 10*640)
-    EQUB LO(&3000 + 11*640)
-    EQUB LO(&3000 + 12*640)
-    EQUB LO(&3000 + 13*640)
-    EQUB LO(&3000 + 14*640)
-    EQUB LO(&3000 + 15*640)
-    EQUB LO(&3000 + 16*640)
-    EQUB LO(&3000 + 17*640)
-    EQUB LO(&3000 + 18*640)
-    EQUB LO(&3000 + 19*640)
-    EQUB LO(&3000 + 20*640)
-    EQUB LO(&3000 + 21*640)
-    EQUB LO(&3000 + 22*640)
-    EQUB LO(&3000 + 23*640)
-    EQUB LO(&3000 + 24*640)
-    EQUB LO(&3000 + 25*640)
-    EQUB LO(&3000 + 26*640)
-    EQUB LO(&3000 + 27*640)
-    EQUB LO(&3000 + 28*640)
-    EQUB LO(&3000 + 29*640)
-    EQUB LO(&3000 + 30*640)
-    EQUB LO(&3000 + 31*640)
+FOR i, 0, 31
+    EQUB LO(&3000 + i*640)
+NEXT
 
 .row_table_hi
-    EQUB HI(&3000 + 0*640)
-    EQUB HI(&3000 + 1*640)
-    EQUB HI(&3000 + 2*640)
-    EQUB HI(&3000 + 3*640)
-    EQUB HI(&3000 + 4*640)
-    EQUB HI(&3000 + 5*640)
-    EQUB HI(&3000 + 6*640)
-    EQUB HI(&3000 + 7*640)
-    EQUB HI(&3000 + 8*640)
-    EQUB HI(&3000 + 9*640)
-    EQUB HI(&3000 + 10*640)
-    EQUB HI(&3000 + 11*640)
-    EQUB HI(&3000 + 12*640)
-    EQUB HI(&3000 + 13*640)
-    EQUB HI(&3000 + 14*640)
-    EQUB HI(&3000 + 15*640)
-    EQUB HI(&3000 + 16*640)
-    EQUB HI(&3000 + 17*640)
-    EQUB HI(&3000 + 18*640)
-    EQUB HI(&3000 + 19*640)
-    EQUB HI(&3000 + 20*640)
-    EQUB HI(&3000 + 21*640)
-    EQUB HI(&3000 + 22*640)
-    EQUB HI(&3000 + 23*640)
-    EQUB HI(&3000 + 24*640)
-    EQUB HI(&3000 + 25*640)
-    EQUB HI(&3000 + 26*640)
-    EQUB HI(&3000 + 27*640)
-    EQUB HI(&3000 + 28*640)
-    EQUB HI(&3000 + 29*640)
-    EQUB HI(&3000 + 30*640)
-    EQUB HI(&3000 + 31*640)
+FOR i, 0, 31
+    EQUB HI(&3000 + i*640)
+NEXT
 
 ; --- MODE 2 colour encoding tables ---
 ; In MODE 2, each byte encodes 2 pixels (left and right).
@@ -1593,66 +1409,32 @@ GUARD &3000
     EQUB &A8   ; colour 14 = 1110 -> 1.1.1.0. = &A8
     EQUB &AA   ; colour 15 = 1111 -> 1.1.1.1. = &AA
 
-.colour_right  ; colour in right pixel position (bits 6,4,2,0)
-    EQUB &00   ; colour 0  = 0000 -> .0.0.0.0 = &00
-    EQUB &01   ; colour 1  = 0001 -> .0.0.0.1 = &01
-    EQUB &04   ; colour 2  = 0010 -> .0.0.1.0 = &04
-    EQUB &05   ; colour 3  = 0011 -> .0.0.1.1 = &05
-    EQUB &10   ; colour 4  = 0100 -> .0.1.0.0 = &10
-    EQUB &11   ; colour 5  = 0101 -> .0.1.0.1 = &11
-    EQUB &14   ; colour 6  = 0110 -> .0.1.1.0 = &14
-    EQUB &15   ; colour 7  = 0111 -> .0.1.1.1 = &15
-    EQUB &40   ; colour 8  = 1000 -> .1.0.0.0 = &40
-    EQUB &41   ; colour 9  = 1001 -> .1.0.0.1 = &41
-    EQUB &44   ; colour 10 = 1010 -> .1.0.1.0 = &44
-    EQUB &45   ; colour 11 = 1011 -> .1.0.1.1 = &45
-    EQUB &50   ; colour 12 = 1100 -> .1.1.0.0 = &50
-    EQUB &51   ; colour 13 = 1101 -> .1.1.0.1 = &51
-    EQUB &54   ; colour 14 = 1110 -> .1.1.1.0 = &54
-    EQUB &55   ; colour 15 = 1111 -> .1.1.1.1 = &55
-
 ; --- Character bitmap data (chars 240-250) ---
 ; 11 characters x 8 bytes = 88 bytes
 .char_data
     ; CHR$240 - caterpillar body
     EQUB 153, 90, 24, 219, 90, 219, 90, 219
-    ; CHR$241 - leaf/food item
+    ; CHR$241 - fruit
     EQUB 6, 24, 126, 223, 191, 191, 223, 126
-    ; CHR$242 - apple
-    EQUB 60, 126, 255, 255, 24, 24, 24, 24
-    ; CHR$243 - mushroom cap left
+    ; CHR$242 - mushroom cap left
     EQUB 0, 0, 0, 15, 63, 127, 255, 255
-    ; CHR$244 - mushroom cap right
+    ; CHR$243 - mushroom cap right
     EQUB 0, 0, 0, 0, 224, 240, 248, 248
-    ; CHR$245 - mushroom stem
+    ; CHR$244 - mushroom stem
     EQUB 7, 7, 7, 7, 7, 0, 0, 0
-    ; CHR$246 - leaf/food
+    ; CHR$245 - leaf/food
     EQUB 8, 28, 28, 107, 127, 107, 8, 28
-    ; CHR$247 - leaf
+    ; CHR$246 - leaf
     EQUB 128, 112, 248, 252, 254, 126, 31, 7
-    ; CHR$248 - twig
+    ; CHR$247 - twig
     EQUB 133, 201, 113, 49, 119, 30, 4, 4
-    ; CHR$249 - acorn top
+    ; CHR$248 - acorn top
     EQUB 0, 24, 44, 94, 94, 191, 191, 255
-    ; CHR$250 - acorn bottom
+    ; CHR$249 - acorn bottom
     EQUB 0, 255, 126, 60, 7, 0, 0, 0
 
 ; --- Sound data blocks (8 bytes each) ---
 ; Format: channel(2), amplitude(2), pitch(2), duration(2)
-
-; Movement buzz: SOUND 0,-15,4,1
-.sound_buzz
-    EQUW 0              ; channel 0
-    EQUW -15            ; amplitude -15
-    EQUW 4              ; pitch 4
-    EQUW 1              ; duration 1
-
-; Fruit appear: SOUND 1,-15,20,1
-.sound_fruit
-    EQUW 1              ; channel 1
-    EQUW -15            ; amplitude -15
-    EQUW 20             ; pitch 20
-    EQUW 1              ; duration 1
 
 ; Hit colour 1 (leaves, 5pts): SOUND 1,-15,5,5
 .sound_hit1
@@ -1675,7 +1457,7 @@ GUARD &3000
     EQUW 25
     EQUW 5
 
-; Hit colour 6 (apples, 20pts): SOUND 1,-15,35,5
+; Hit colour 4 (fruits, 20pts): SOUND 1,-15,35,5
 .sound_hit4
     EQUW 1
     EQUW -15
@@ -1692,336 +1474,112 @@ GUARD &3000
 ; --- Season configuration table (8 bytes per season) ---
 ; Format: map_lo, map_hi, map_rows, scroll_div, fruit_char, fruit_colour, pad, pad
 .season_config
-    EQUB LO(map_autumn), HI(map_autumn), 64, 2, 247, 1, 0, 0   ; Autumn: leaf (chr247), red
-    EQUB LO(map_winter), HI(map_winter), 64, 2, 248, 7, 0, 0   ; Winter: twig (chr248), white
-    EQUB LO(map_spring), HI(map_spring), 64, 2, 246, 5, 0, 0   ; Spring: flower (chr246), magenta
-    EQUB LO(map_summer), HI(map_summer), 64, 2, 242, 6, 0, 0   ; Summer: apple (chr242), cyan
+    EQUB LO(map_autumn), HI(map_autumn), 64, 2, 246, 1, 0, 0   ; Autumn: leaf (chr246), red
+    EQUB LO(map_winter), HI(map_winter), 64, 2, 247, 7, 0, 0   ; Winter: twig (chr247), white
+    EQUB LO(map_spring), HI(map_spring), 64, 2, 245, 5, 0, 0   ; Spring: flower (chr245), magenta
+    EQUB LO(map_summer), HI(map_summer), 64, 2, 241, 4, 0, 0   ; Summer: fruit (chr241), blue
 
 ; ============================================================================
 ; Section: Map Data (4 seasons x 64 rows each)
-; Item encoding:
-;   &00-&13: mushroom at column 0-19 (2 chars wide: cap at col/col+1)
+; Pair format: row_number, type_col, ... &FF sentinel
+; Item encoding (type_col byte):
+;   &00-&13: mushroom at column 0-19
 ;   &20-&33: season fruit at column 0-19
-;   &40-&53: acorn at column 0-19 (2 rows)
-;   &FF: end of row
-; Design: corridors, clearings, pinch points. No column reuse on consecutive rows.
+;   &40-&53: acorn at column 0-19
+; Empty rows need no data (parser skips rows with no matching pairs)
 ; ============================================================================
 
-; --- Autumn map: sparse, wide corridors, gentle introduction ---
+; --- Autumn map (32 items, 65 bytes) ---
 .map_autumn
-    ; Wide open patches with occasional mushrooms, leaves scattered
-    EQUB &FF                              ; row 0: empty
-    EQUB &FF                              ; row 1: empty
-    EQUB &03, &FF                         ; row 2: mushroom col 3
-    EQUB &FF                              ; row 3: empty (stem clearance)
-    EQUB &25, &FF                         ; row 4: leaf col 5
-    EQUB &FF                              ; row 5: empty
-    EQUB &0E, &FF                         ; row 6: mushroom col 14
-    EQUB &FF                              ; row 7: empty
-    EQUB &FF                              ; row 8: empty
-    EQUB &22, &FF                         ; row 9: leaf col 2
-    EQUB &05, &FF                         ; row 10: mushroom col 5
-    EQUB &FF                              ; row 11: empty
-    EQUB &2C, &FF                         ; row 12: leaf col 12
-    EQUB &FF                              ; row 13: empty
-    EQUB &10, &FF                         ; row 14: mushroom col 16
-    EQUB &FF                              ; row 15: empty
-    EQUB &FF                              ; row 16: empty
-    EQUB &02, &0B, &FF                    ; row 17: mushroom col 2 + col 11
-    EQUB &FF                              ; row 18: empty
-    EQUB &27, &FF                         ; row 19: leaf col 7
-    EQUB &FF                              ; row 20: empty
-    EQUB &08, &FF                         ; row 21: mushroom col 8
-    EQUB &FF                              ; row 22: empty
-    EQUB &2F, &FF                         ; row 23: leaf col 15
-    EQUB &FF                              ; row 24: empty
-    EQUB &12, &FF                         ; row 25: mushroom col 18
-    EQUB &FF                              ; row 26: empty
-    EQUB &FF                              ; row 27: empty
-    EQUB &06, &FF                         ; row 28: mushroom col 6
-    EQUB &FF                              ; row 29: empty
-    EQUB &24, &FF                         ; row 30: leaf col 4
-    EQUB &FF                              ; row 31: empty
-    EQUB &0D, &FF                         ; row 32: mushroom col 13
-    EQUB &FF                              ; row 33: empty
-    EQUB &FF                              ; row 34: empty
-    EQUB &01, &FF                         ; row 35: mushroom col 1
-    EQUB &FF                              ; row 36: empty
-    EQUB &2A, &FF                         ; row 37: leaf col 10
-    EQUB &FF                              ; row 38: empty
-    EQUB &0F, &FF                         ; row 39: mushroom col 15
-    EQUB &FF                              ; row 40: empty
-    EQUB &FF                              ; row 41: empty
-    EQUB &04, &10, &FF                    ; row 42: mushroom col 4 + col 16
-    EQUB &FF                              ; row 43: empty
-    EQUB &29, &FF                         ; row 44: leaf col 9
-    EQUB &FF                              ; row 45: empty
-    EQUB &09, &FF                         ; row 46: mushroom col 9
-    EQUB &FF                              ; row 47: empty
-    EQUB &FF                              ; row 48: empty
-    EQUB &2D, &FF                         ; row 49: leaf col 13
-    EQUB &07, &FF                         ; row 50: mushroom col 7
-    EQUB &FF                              ; row 51: empty
-    EQUB &44, &FF                         ; row 52: acorn col 4 (left)
-    EQUB &11, &FF                         ; row 53: mushroom col 17
-    EQUB &FF                              ; row 54: empty
-    EQUB &23, &FF                         ; row 55: leaf col 3
-    EQUB &FF                              ; row 56: empty
-    EQUB &0A, &FF                         ; row 57: mushroom col 10
-    EQUB &FF                              ; row 58: empty
-    EQUB &FF                              ; row 59: empty
-    EQUB &03, &0F, &FF                    ; row 60: mushroom col 3 + col 15
-    EQUB &FF                              ; row 61: empty
-    EQUB &2B, &FF                         ; row 62: leaf col 11
-    EQUB &FF                              ; row 63: empty
+    EQUB 2, &03, 4, &25, 6, &0E
+    EQUB 9, &22, 10, &05, 12, &2C, 14, &10
+    EQUB 17, &02, 17, &0B, 19, &27
+    EQUB 21, &08, 23, &2F, 25, &12
+    EQUB 28, &06, 30, &24, 32, &0D
+    EQUB 35, &01, 37, &2A, 39, &0F
+    EQUB 42, &04, 42, &10, 44, &29
+    EQUB 46, &09, 49, &2D, 50, &07
+    EQUB 52, &44, 53, &11, 55, &23
+    EQUB 57, &0A, 60, &03, 60, &0F
+    EQUB 62, &2B, &FF
 
-; --- Winter map: moderate density, medium corridors ---
+; --- Winter map (47 items, 95 bytes) ---
 .map_winter
-    EQUB &02, &FF                         ; row 0: mushroom col 2
-    EQUB &FF                              ; row 1: empty
-    EQUB &0A, &FF                         ; row 2: mushroom col 10
-    EQUB &FF                              ; row 3: empty
-    EQUB &26, &FF                         ; row 4: twig col 6
-    EQUB &05, &0E, &FF                    ; row 5: mushroom col 5 + col 14
-    EQUB &FF                              ; row 6: empty
-    EQUB &10, &FF                         ; row 7: mushroom col 16
-    EQUB &FF                              ; row 8: empty
-    EQUB &03, &FF                         ; row 9: mushroom col 3
-    EQUB &2C, &FF                         ; row 10: twig col 12
-    EQUB &09, &FF                         ; row 11: mushroom col 9
-    EQUB &FF                              ; row 12: empty
-    EQUB &01, &0C, &FF                    ; row 13: mushroom col 1 + col 12
-    EQUB &FF                              ; row 14: empty
-    EQUB &FF                              ; row 15: empty
-    EQUB &FF                              ; row 16: empty
-    EQUB &11, &FF                         ; row 17: mushroom col 17
-    EQUB &28, &FF                         ; row 18: twig col 8
-    EQUB &04, &FF                         ; row 19: mushroom col 4
-    EQUB &FF                              ; row 20: empty
-    EQUB &0D, &FF                         ; row 21: mushroom col 13
-    EQUB &FF                              ; row 22: empty
-    EQUB &08, &12, &FF                    ; row 23: mushroom col 8 + col 18
-    EQUB &FF                              ; row 24: empty
-    EQUB &22, &FF                         ; row 25: twig col 2
-    EQUB &0B, &FF                         ; row 26: mushroom col 11
-    EQUB &FF                              ; row 27: empty
-    EQUB &06, &FF                         ; row 28: mushroom col 6
-    EQUB &FF                              ; row 29: empty
-    EQUB &0F, &FF                         ; row 30: mushroom col 15
-    EQUB &2E, &FF                         ; row 31: twig col 14
-    EQUB &02, &0A, &FF                    ; row 32: mushroom col 2 + col 10
-    EQUB &FF                              ; row 33: empty
-    EQUB &12, &FF                         ; row 34: mushroom col 18
-    EQUB &FF                              ; row 35: empty
-    EQUB &05, &FF                         ; row 36: mushroom col 5
-    EQUB &2A, &FF                         ; row 37: twig col 10
-    EQUB &0E, &FF                         ; row 38: mushroom col 14
-    EQUB &FF                              ; row 39: empty
-    EQUB &01, &09, &FF                    ; row 40: mushroom col 1 + col 9
-    EQUB &FF                              ; row 41: empty
-    EQUB &0C, &FF                         ; row 42: mushroom col 12
-    EQUB &FF                              ; row 43: empty
-    EQUB &24, &FF                         ; row 44: twig col 4
-    EQUB &07, &10, &FF                    ; row 45: mushroom col 7 + col 16
-    EQUB &FF                              ; row 46: empty
-    EQUB &FF                              ; row 47: empty
-    EQUB &FF                              ; row 48: empty
-    EQUB &0B, &FF                         ; row 49: mushroom col 11
-    EQUB &30, &FF                         ; row 50: twig col 16
-    EQUB &06, &11, &FF                    ; row 51: mushroom col 6 + col 17
-    EQUB &50, &FF                         ; row 52: acorn col 16 (right)
-    EQUB &0D, &FF                         ; row 53: mushroom col 13
-    EQUB &FF                              ; row 54: empty
-    EQUB &04, &FF                         ; row 55: mushroom col 4
-    EQUB &FF                              ; row 56: empty
-    EQUB &08, &0F, &FF                    ; row 57: mushroom col 8 + col 15
-    EQUB &FF                              ; row 58: empty
-    EQUB &26, &FF                         ; row 59: twig col 6
-    EQUB &10, &FF                         ; row 60: mushroom col 16
-    EQUB &FF                              ; row 61: empty
-    EQUB &02, &0B, &FF                    ; row 62: mushroom col 2 + col 11
-    EQUB &FF                              ; row 63: empty
+    EQUB 0, &02, 2, &0A, 4, &26
+    EQUB 5, &05, 5, &0E, 7, &10
+    EQUB 9, &03, 10, &2C, 11, &09
+    EQUB 13, &01, 13, &0C
+    EQUB 17, &11, 18, &28, 19, &04
+    EQUB 21, &0D, 23, &08, 23, &12
+    EQUB 25, &22, 26, &0B, 28, &06
+    EQUB 30, &0F, 31, &2E
+    EQUB 32, &02, 32, &0A, 34, &12
+    EQUB 36, &05, 37, &2A, 38, &0E
+    EQUB 40, &01, 40, &09, 42, &0C
+    EQUB 44, &24, 45, &07, 45, &10
+    EQUB 49, &0B, 50, &30
+    EQUB 51, &06, 51, &11, 52, &50
+    EQUB 53, &0D, 55, &04
+    EQUB 57, &08, 57, &0F, 59, &26
+    EQUB 60, &10, 62, &02, 62, &0B
+    EQUB &FF
 
-; --- Spring map: moderate density, flowers as rewards ---
+; --- Spring map (45 items, 91 bytes) ---
 .map_spring
-    EQUB &03, &FF                         ; row 0: mushroom col 3
-    EQUB &FF                              ; row 1: empty
-    EQUB &0E, &FF                         ; row 2: mushroom col 14
-    EQUB &FF                              ; row 3: empty
-    EQUB &07, &FF                         ; row 4: mushroom col 7
-    EQUB &2B, &FF                         ; row 5: flower col 11
-    EQUB &FF                              ; row 6: empty
-    EQUB &02, &10, &FF                    ; row 7: mushrooms col 2 + col 16
-    EQUB &FF                              ; row 8: empty
-    EQUB &0A, &FF                         ; row 9: mushroom col 10
-    EQUB &FF                              ; row 10: empty
-    EQUB &05, &0F, &FF                    ; row 11: mushrooms col 5 + col 15
-    EQUB &FF                              ; row 12: empty
-    EQUB &09, &FF                         ; row 13: mushroom col 9
-    EQUB &FF                              ; row 14: empty
-    EQUB &FF                              ; row 15: empty
-    EQUB &FF                              ; row 16: empty
-    EQUB &25, &FF                         ; row 17: flower col 5
-    EQUB &06, &FF                         ; row 18: mushroom col 6
-    EQUB &FF                              ; row 19: empty
-    EQUB &0C, &FF                         ; row 20: mushroom col 12
-    EQUB &FF                              ; row 21: empty
-    EQUB &04, &11, &FF                    ; row 22: mushrooms col 4 + col 17
-    EQUB &FF                              ; row 23: empty
-    EQUB &08, &FF                         ; row 24: mushroom col 8
-    EQUB &FF                              ; row 25: empty
-    EQUB &03, &0E, &FF                    ; row 26: mushrooms col 3 + col 14
-    EQUB &FF                              ; row 27: empty
-    EQUB &0B, &FF                         ; row 28: mushroom col 11
-    EQUB &2F, &FF                         ; row 29: flower col 15
-    EQUB &FF                              ; row 30: empty
-    EQUB &06, &12, &FF                    ; row 31: mushrooms col 6 + col 18
-    EQUB &FF                              ; row 32: empty
-    EQUB &02, &0F, &FF                    ; row 33: mushrooms col 2 + col 15
-    EQUB &FF                              ; row 34: empty
-    EQUB &09, &FF                         ; row 35: mushroom col 9
-    EQUB &FF                              ; row 36: empty
-    EQUB &05, &10, &FF                    ; row 37: mushrooms col 5 + col 16
-    EQUB &FF                              ; row 38: empty
-    EQUB &23, &FF                         ; row 39: flower col 3
-    EQUB &0A, &FF                         ; row 40: mushroom col 10
-    EQUB &FF                              ; row 41: empty
-    EQUB &01, &0D, &FF                    ; row 42: mushrooms col 1 + col 13
-    EQUB &FF                              ; row 43: empty
-    EQUB &07, &FF                         ; row 44: mushroom col 7
-    EQUB &FF                              ; row 45: empty
-    EQUB &FF                              ; row 46: empty
-    EQUB &FF                              ; row 47: empty
-    EQUB &0C, &FF                         ; row 48: mushroom col 12
-    EQUB &2D, &FF                         ; row 49: flower col 13
-    EQUB &FF                              ; row 50: empty
-    EQUB &08, &0E, &FF                    ; row 51: mushrooms col 8 + col 14
-    EQUB &45, &FF                         ; row 52: acorn col 5 (left)
-    EQUB &03, &FF                         ; row 53: mushroom col 3
-    EQUB &FF                              ; row 54: empty
-    EQUB &0B, &10, &FF                    ; row 55: mushrooms col 11 + col 16
-    EQUB &FF                              ; row 56: empty
-    EQUB &06, &FF                         ; row 57: mushroom col 6
-    EQUB &FF                              ; row 58: empty
-    EQUB &27, &FF                         ; row 59: flower col 7
-    EQUB &02, &0F, &FF                    ; row 60: mushrooms col 2 + col 15
-    EQUB &FF                              ; row 61: empty
-    EQUB &09, &FF                         ; row 62: mushroom col 9
-    EQUB &FF                              ; row 63: empty
+    EQUB 0, &03, 2, &0E, 4, &07
+    EQUB 5, &2B, 7, &02, 7, &10
+    EQUB 9, &0A, 11, &05, 11, &0F
+    EQUB 13, &09, 17, &25, 18, &06
+    EQUB 20, &0C, 22, &04, 22, &11
+    EQUB 24, &08, 26, &03, 26, &0E
+    EQUB 28, &0B, 29, &2F
+    EQUB 31, &06, 31, &12
+    EQUB 33, &02, 33, &0F, 35, &09
+    EQUB 37, &05, 37, &10, 39, &23
+    EQUB 40, &0A, 42, &01, 42, &0D
+    EQUB 44, &07, 48, &0C, 49, &2D
+    EQUB 51, &08, 51, &0E, 52, &45
+    EQUB 53, &03, 55, &0B, 55, &10
+    EQUB 57, &06, 59, &27
+    EQUB 60, &02, 60, &0F, 62, &09
+    EQUB &FF
 
-; --- Summer map: dense, tight passages, apples ---
+; --- Summer map (61 items, 123 bytes) ---
 .map_summer
-    EQUB &02, &0E, &FF                    ; row 0: mushrooms col 2 + col 14
-    EQUB &FF                              ; row 1: empty
-    EQUB &08, &FF                         ; row 2: mushroom col 8
-    EQUB &FF                              ; row 3: empty
-    EQUB &05, &11, &FF                    ; row 4: mushrooms col 5 + col 17
-    EQUB &25, &FF                         ; row 5: apple col 5
-    EQUB &0B, &FF                         ; row 6: mushroom col 11
-    EQUB &FF                              ; row 7: empty
-    EQUB &03, &0F, &FF                    ; row 8: mushrooms col 3 + col 15
-    EQUB &FF                              ; row 9: empty
-    EQUB &07, &12, &FF                    ; row 10: mushrooms col 7 + col 18
-    EQUB &FF                              ; row 11: empty
-    EQUB &01, &0D, &FF                    ; row 12: mushrooms col 1 + col 13
-    EQUB &2B, &FF                         ; row 13: apple col 11
-    EQUB &09, &FF                         ; row 14: mushroom col 9
-    EQUB &FF                              ; row 15: empty
-    EQUB &FF                              ; row 16: empty
-    EQUB &FF                              ; row 17: empty
-    EQUB &0A, &FF                         ; row 18: mushroom col 10
-    EQUB &FF                              ; row 19: empty
-    EQUB &06, &0E, &FF                    ; row 20: mushrooms col 6 + col 14
-    EQUB &FF                              ; row 21: empty
-    EQUB &02, &0B, &FF                    ; row 22: mushrooms col 2 + col 11
-    EQUB &22, &FF                         ; row 23: apple col 2
-    EQUB &08, &10, &FF                    ; row 24: mushrooms col 8 + col 16
-    EQUB &FF                              ; row 25: empty
-    EQUB &05, &0D, &FF                    ; row 26: mushrooms col 5 + col 13
-    EQUB &FF                              ; row 27: empty
-    EQUB &01, &0F, &FF                    ; row 28: mushrooms col 1 + col 15
-    EQUB &2F, &FF                         ; row 29: apple col 15
-    EQUB &09, &FF                         ; row 30: mushroom col 9
-    EQUB &FF                              ; row 31: empty
-    EQUB &03, &0C, &FF                    ; row 32: mushrooms col 3 + col 12
-    EQUB &FF                              ; row 33: empty
-    EQUB &07, &11, &FF                    ; row 34: mushrooms col 7 + col 17
-    EQUB &FF                              ; row 35: empty
-    EQUB &0A, &FF                         ; row 36: mushroom col 10
-    EQUB &27, &FF                         ; row 37: apple col 7
-    EQUB &04, &0E, &FF                    ; row 38: mushrooms col 4 + col 14
-    EQUB &FF                              ; row 39: empty
-    EQUB &02, &0B, &FF                    ; row 40: mushrooms col 2 + col 11
-    EQUB &FF                              ; row 41: empty
-    EQUB &06, &10, &FF                    ; row 42: mushrooms col 6 + col 16
-    EQUB &FF                              ; row 43: empty
-    EQUB &08, &12, &FF                    ; row 44: mushrooms col 8 + col 18
-    EQUB &FF                              ; row 45: empty
-    EQUB &FF                              ; row 46: empty
-    EQUB &FF                              ; row 47: empty
-    EQUB &05, &0F, &FF                    ; row 48: mushrooms col 5 + col 15
-    EQUB &FF                              ; row 49: empty
-    EQUB &01, &0B, &FF                    ; row 50: mushrooms col 1 + col 11
-    EQUB &4F, &FF                         ; row 51: acorn col 15 (right)
-    EQUB &07, &10, &FF                    ; row 52: mushrooms col 7 + col 16
-    EQUB &24, &FF                         ; row 53: apple col 4
-    EQUB &0C, &FF                         ; row 54: mushroom col 12
-    EQUB &FF                              ; row 55: empty
-    EQUB &04, &0E, &FF                    ; row 56: mushrooms col 4 + col 14
-    EQUB &FF                              ; row 57: empty
-    EQUB &09, &12, &FF                    ; row 58: mushrooms col 9 + col 18
-    EQUB &2E, &FF                         ; row 59: apple col 14
-    EQUB &06, &0F, &FF                    ; row 60: mushrooms col 6 + col 15
-    EQUB &FF                              ; row 61: empty
-    EQUB &02, &0B, &FF                    ; row 62: mushrooms col 2 + col 11
-    EQUB &FF                              ; row 63: empty
+    EQUB 0, &02, 0, &0E, 2, &08
+    EQUB 4, &05, 4, &11, 5, &25
+    EQUB 6, &0B, 8, &03, 8, &0F
+    EQUB 10, &07, 10, &12
+    EQUB 12, &01, 12, &0D, 13, &2B
+    EQUB 14, &09, 18, &0A
+    EQUB 20, &06, 20, &0E
+    EQUB 22, &02, 22, &0B, 23, &22
+    EQUB 24, &08, 24, &10
+    EQUB 26, &05, 26, &0D
+    EQUB 28, &01, 28, &0F, 29, &2F
+    EQUB 30, &09, 32, &03, 32, &0C
+    EQUB 34, &07, 34, &11, 36, &0A
+    EQUB 37, &27, 38, &04, 38, &0E
+    EQUB 40, &02, 40, &0B
+    EQUB 42, &06, 42, &10
+    EQUB 44, &08, 44, &12
+    EQUB 48, &05, 48, &0F
+    EQUB 50, &01, 50, &0B, 51, &4F
+    EQUB 52, &07, 52, &10, 53, &24
+    EQUB 54, &0C, 56, &04, 56, &0E
+    EQUB 58, &09, 58, &12, 59, &2E
+    EQUB 60, &06, 60, &0F
+    EQUB 62, &02, 62, &0B
+    EQUB &FF
 
-; --- Bonus map: 32 acorn rows + 32 empty rows (cool-down) ---
-; Leading empty page handled by transition ("Bonus" text)
+; --- Bonus map (16 items, 33 bytes) ---
 .map_bonus
-    ; Rows 0-31: acorns scattered across screen
-    ; Acorns every 2 rows (need 2 rows for display: top row 1, bottom row 2)
-    EQUB &44, &FF                                  ; row 0: acorn col 4
-    EQUB &FF                                       ; row 1: empty (clearance)
-    EQUB &4D, &FF                                  ; row 2: acorn col 13
-    EQUB &FF                                       ; row 3: empty
-    EQUB &48, &FF                                  ; row 4: acorn col 8
-    EQUB &FF                                       ; row 5: empty
-    EQUB &42, &FF                                  ; row 6: acorn col 2
-    EQUB &FF                                       ; row 7: empty
-    EQUB &4F, &FF                                  ; row 8: acorn col 15
-    EQUB &FF                                       ; row 9: empty
-    EQUB &46, &FF                                  ; row 10: acorn col 6
-    EQUB &FF                                       ; row 11: empty
-    EQUB &4B, &FF                                  ; row 12: acorn col 11
-    EQUB &FF                                       ; row 13: empty
-    EQUB &43, &FF                                  ; row 14: acorn col 3
-    EQUB &FF                                       ; row 15: empty
-    EQUB &50, &FF                                  ; row 16: acorn col 16
-    EQUB &FF                                       ; row 17: empty
-    EQUB &49, &FF                                  ; row 18: acorn col 9
-    EQUB &FF                                       ; row 19: empty
-    EQUB &45, &FF                                  ; row 20: acorn col 5
-    EQUB &FF                                       ; row 21: empty
-    EQUB &4E, &FF                                  ; row 22: acorn col 14
-    EQUB &FF                                       ; row 23: empty
-    EQUB &47, &FF                                  ; row 24: acorn col 7
-    EQUB &FF                                       ; row 25: empty
-    EQUB &4C, &FF                                  ; row 26: acorn col 12
-    EQUB &FF                                       ; row 27: empty
-    EQUB &41, &FF                                  ; row 28: acorn col 1
-    EQUB &FF                                       ; row 29: empty
-    EQUB &51, &FF                                  ; row 30: acorn col 17
-    EQUB &FF                                       ; row 31: empty
-    ; Rows 32-63: empty (cool-down before completed screen)
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 32-35
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 36-39
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 40-43
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 44-47
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 48-51
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 52-55
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 56-59
-    EQUB &FF : EQUB &FF : EQUB &FF : EQUB &FF     ; rows 60-63
+    EQUB 0, &44, 2, &4D, 4, &48
+    EQUB 6, &42, 8, &4F, 10, &46
+    EQUB 12, &4B, 14, &43, 16, &50
+    EQUB 18, &49, 20, &45, 22, &4E
+    EQUB 24, &47, 26, &4C, 28, &41
+    EQUB 30, &51, &FF
 
 ; --- Season name lookup tables ---
 .season_name_lo
