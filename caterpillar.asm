@@ -1,5 +1,5 @@
 ; ============================================================================
-; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.0.4
+; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.0.5
 ; Converted from BBC BASIC by Paul Newell with some ssistance from Claude Code (c) 2026
 ; Game engine only - title/menu/scores handled by BASIC in MODE 7
 ; ============================================================================
@@ -189,7 +189,7 @@ GUARD &3000
     LDA map_base_lo : STA map_ptr_lo
     LDA map_base_hi : STA map_ptr_hi
     LDA #0 : STA map_row_idx
-    LDA item_skip : STA item_counter  ; reset skip counter for new cycle
+    LDA #0 : STA item_counter  ; reset skip counter for new cycle
     JMP after_scroll
 .transition_done
     LDA #0 : STA transition_phase
@@ -521,9 +521,9 @@ GUARD &3000
     STA col_offset
     LDA season_config+7,X
     STA item_skip
-    STA item_counter     ; prime counter so first item draws
     LDA #0
     STA map_row_idx
+    STA item_counter     ; reset skip counter
     STA acorn_state      ; reset acorn counter for this season
     RTS
 
@@ -678,17 +678,26 @@ GUARD &3000
 
     STA temp2               ; save type_col before skip check clobbers A
 
-    ; --- Item skip check (draw every Nth item, evenly distributed) ---
-    LDA item_counter
-    SEC
-    SBC #1
-    BEQ dmr_draw_item       ; reached zero -> draw this item
-    STA item_counter        ; save decremented counter
-    JMP dmr_next_item       ; skip this item
-.dmr_draw_item
-    LDA item_skip
-    STA item_counter        ; reset counter for next item
+    ; Acorns (&40+) bypass the skip check - always drawn when encountered
+    CMP #&40
+    BCS dmr_apply_offset
 
+    ; Fruits (&20+) bypass the skip check - always drawn
+    CMP #&20
+    BCS dmr_apply_offset
+
+    ; --- Mushroom skip check (skip every Nth mushroom: 0=none, 2=every 2nd, 3=every 3rd) ---
+    LDA item_skip
+    BEQ dmr_apply_offset    ; 0 = no skipping, draw all
+    INC item_counter
+    LDA item_counter
+    CMP item_skip
+    BCC dmr_apply_offset    ; counter < skip -> draw this item
+    LDA #0
+    STA item_counter        ; reset counter, skip this item
+    JMP dmr_next_item
+
+.dmr_apply_offset
     ; --- Apply column offset ---
     LDA temp2               ; restore type_col
     AND #&1F                ; extract column (0-19)
@@ -1361,8 +1370,8 @@ GUARD &3000
 
 ; --- Map compression variables ---
 .col_offset       EQUB 0   ; column offset for current season (0-19)
-.item_skip        EQUB 0   ; draw every Nth item (1=all, 2=every other, 3=every 3rd)
-.item_counter     EQUB 0   ; countdown to next item draw (reset to item_skip)
+.item_skip        EQUB 0   ; skip every Nth mushroom (0=none, 2=every 2nd, 3=every 3rd)
+.item_counter     EQUB 0   ; counts up, resets at item_skip (skip that mushroom)
 
 ; --- Sprite save buffer (40 bytes for 5 byte-columns x 8 rows) ---
 .save_buffer
@@ -1557,12 +1566,12 @@ NEXT
 
 ; --- Season configuration table (8 bytes per season) ---
 ; Format: map_lo, map_hi, map_rows, scroll_div, fruit_char, fruit_colour, col_offset, item_skip
-; All seasons share map_base. col_offset shifts columns, item_skip draws every Nth item.
+; All seasons share map_base. col_offset shifts columns, item_skip skips every Nth mushroom (0=none).
 .season_config
-    EQUB LO(map_base), HI(map_base), 64, 2, 246, 1, 5, 3      ; Autumn: every 3rd item, offset 5
-    EQUB LO(map_base), HI(map_base), 64, 2, 247, 7, 10, 2     ; Winter: every 2nd item, offset 10
-    EQUB LO(map_base), HI(map_base), 64, 2, 245, 5, 15, 1     ; Spring: all items, offset 15
-    EQUB LO(map_base), HI(map_base), 64, 2, 241, 4, 0, 1      ; Summer: all items, no offset
+    EQUB LO(map_base), HI(map_base), 64, 2, 246, 1, 5, 2      ; Autumn: skip every 2nd mush (50%), offset 5
+    EQUB LO(map_base), HI(map_base), 64, 2, 247, 7, 10, 3     ; Winter: skip every 3rd mush (67%), offset 10
+    EQUB LO(map_base), HI(map_base), 64, 2, 245, 5, 15, 4     ; Spring: skip every 4th mush (75%), offset 15
+    EQUB LO(map_base), HI(map_base), 64, 2, 241, 4, 0, 0      ; Summer: all mushrooms, no offset
 
 ; ============================================================================
 ; Section: Map Data (single base map shared by all seasons)
@@ -1572,30 +1581,38 @@ NEXT
 ;   &20-&33: season fruit at column 0-19
 ;   &40-&53: acorn at column 0-19
 ; Empty rows need no data (parser skips rows with no matching pairs)
-; All seasons use map_base with per-season col_offset and item_limit
+; All seasons use map_base with per-season col_offset and item_skip (mushrooms only)
 ; ============================================================================
 
-; --- Base map (56 items, 113 bytes) - shared by all seasons ---
-; 25 mushrooms, 25 fruits, 6 acorns - balanced mix
+; --- Base map (53 items, 107 bytes) - shared by all seasons ---
+; 31 mushrooms, 20 fruits, 2 acorns
+; MAX 1 ITEM PER ROW to avoid frame overrun from VDU calls
+; Acorns at rows 9 and 35 (start + middle), bypass item_skip so always drawn
+; Acorn columns: col 11 and col 6 -> different position every season via offset
 ; Mushroom columns avoid {4,9,14,19} to prevent cap overflow after any offset
 .map_base
-    EQUB 0, &03, 0, &2F, 2, &28
-    EQUB 4, &06, 4, &10, 6, &4C
-    EQUB 8, &23, 8, &0F, 10, &07, 10, &32
-    EQUB 12, &21, 12, &2D, 14, &0A
-    EQUB 16, &45, 18, &02, 18, &2D
-    EQUB 20, &27, 20, &11, 22, &0B, 22, &23
-    EQUB 24, &28, 24, &10, 26, &53
-    EQUB 28, &01, 28, &2C, 30, &27, 30, &0F
-    EQUB 32, &03, 32, &31, 34, &2A, 34, &0D
-    EQUB 36, &46, 38, &05, 38, &32
-    EQUB 40, &22, 40, &0D, 42, &08, 42, &30
-    EQUB 44, &25, 44, &11, 46, &4A
-    EQUB 48, &06, 48, &2F, 50, &21, 50, &0C
-    EQUB 52, &0A, 52, &33, 53, &43
-    EQUB 54, &27, 56, &05, 56, &30
-    EQUB 58, &2B, 58, &12, 60, &08, 60, &32
-    EQUB 62, &22, 62, &10
+    EQUB 0, &03, 1, &0F, 2, &28
+    EQUB 4, &06, 5, &10
+    EQUB 7, &0F, 8, &23, 9, &4B
+    EQUB 10, &07, 11, &32
+    EQUB 12, &21, 13, &0D, 14, &0A
+    EQUB 17, &2D, 18, &02
+    EQUB 19, &11, 20, &27
+    EQUB 22, &0B, 23, &23
+    EQUB 24, &28, 25, &10
+    EQUB 27, &01, 28, &2C, 29, &07
+    EQUB 30, &0F, 32, &03, 33, &31
+    EQUB 34, &2A, 35, &46, 36, &0D
+    EQUB 38, &05, 39, &32
+    EQUB 40, &22, 41, &0D
+    EQUB 42, &08, 43, &10
+    EQUB 44, &25, 45, &11
+    EQUB 47, &06, 48, &2F, 49, &21
+    EQUB 50, &0C, 52, &0A, 53, &33
+    EQUB 54, &27, 55, &05, 56, &30
+    EQUB 57, &0B, 58, &12
+    EQUB 60, &08, 61, &12
+    EQUB 62, &22, 63, &10
     EQUB &FF
 
 ; --- Bonus map  ---
@@ -1605,7 +1622,9 @@ NEXT
     EQUB 12, &4B, 14, &43, 16, &50
     EQUB 18, &49, 20, &45, 22, &4E
     EQUB 24, &47, 26, &4C, 28, &41
-    EQUB 30, &51, &FF
+    EQUB 30, &51
+    EQUB 32, &4A, 34, &52, 36, &47, 38, &4E
+    EQUB &FF
 
 ; --- Season name lookup tables ---
 .season_name_lo

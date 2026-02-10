@@ -42,26 +42,25 @@ Loop back to title
 - [ ] Pixel-perfect collision detection
 
 ## Map System
-All 4 seasons share a single base map (`map_base`: 25 mushrooms, 25 fruits, 6 acorns).
+All 4 seasons share a single base map (`map_base`: 31 mushrooms, 20 fruits, 2 acorns).
 Per-season variation via two config values in `season_config` (bytes 6-7):
 
 - **col_offset** (0-19) — shifts all item columns right, wrapping at 20
-- **item_skip** (1-N) — draw every Nth item (1=all, 2=every other, 3=every 3rd)
+- **item_skip** (0-N) — skip every Nth mushroom (0=none). Fruits and acorns always drawn.
 
-```
-Season   col_offset   item_skip   Items drawn   Difficulty
-------   ----------   ---------   -----------   ----------
-Autumn   5            3           ~19           Sparse
-Winter   10           2           ~28           Moderate
-Spring   15           1           56            Dense
-Summer   0            1           56            Full
-```
+| Season | col_offset | item_skip | Mushrooms | Fruits | Acorns | Difficulty  |
+|--------|------------|-----------|-----------|--------|--------|-------------|
+| Autumn | 5          | 2         | ~16 (50%) | 20     | 2      | Easy        |
+| Winter | 10         | 3         | ~21 (67%) | 20     | 2      | Medium      |
+| Spring | 15         | 4         | ~23 (75%) | 20     | 2      | Medium-hard |
+| Summer | 0          | 0         | 31 (100%) | 20     | 2      | Hard        |
 
 Mushroom columns in base map avoid {4,9,14,19} so no cap overflows column 19 after offset.
+Acorns at rows 9 and 35, bypass skip check so always drawn regardless of season.
 
 ## Memory Layout
 - `&0060-&009F` - Zero page variables (position, score, game_result)
-- `&1900-&2335` - Assembly game engine code + data
+- `&1900-&2338` - Assembly game engine code + data
 - `&2800-&2FFF` - BASIC program (PAGE=&2800, HIMEM=&3000)
 - `&3000-&7FFF` - MODE 2 screen memory
 

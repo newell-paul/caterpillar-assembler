@@ -1,8 +1,8 @@
 # Caterpillar Improvements
 
 ### Improvements
-
-
+- [ ] multiplier for getting mushrooms. For every acorn the value for the next one goes up by another 50
+  - 50 acorns 
 
 ### Map System
 - [ ] **Seeded procedural generation** (Optional Major Refactor)
