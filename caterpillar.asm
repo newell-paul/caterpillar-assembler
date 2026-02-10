@@ -1,5 +1,5 @@
 ; ============================================================================
-; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version)
+; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.0.3
 ; Converted from BBC BASIC by Paul Newell with heavily steered assistance from Claude Code (c) 2026
 ; Game engine only - title/menu/scores handled by BASIC in MODE 7
 ; ============================================================================
@@ -111,8 +111,20 @@ GUARD &3000
     LDA #13
     JSR send_vdu_seq
 
-    ; Define characters 240-250 (lines 70-170)
+    ; Define characters 240-250
     JSR define_characters
+
+    ; Define sound envelope 1: gulp effect (descending pitch, quick decay)
+    LDA #8
+    LDX #LO(envelope_data)
+    LDY #HI(envelope_data)
+    JSR OSWORD
+
+    ; Define sound envelope 2: acorn "ding" (rising then falling pitch)
+    LDA #8
+    LDX #LO(envelope2_data)
+    LDY #HI(envelope2_data)
+    JSR OSWORD
 
     ; Initialise caterpillar position in pixel coords
     LDA #PX_CAT_INIT_X
@@ -139,7 +151,7 @@ GUARD &3000
     LDA #2 : STA scroll_div : STA scroll_count  ; initial scroll speed
     JSR enter_transition ; show "Autumn", load empty transition map
 
-    ; TIME=0 (line 200) - reset system timer via OSWORD 2
+    ; TIME=0 - reset system timer via OSWORD 2
     JSR reset_time
 
     ; Seed PRNG from system timer if not already seeded
@@ -259,7 +271,7 @@ GUARD &3000
     JMP game_loop
 
 ; ============================================================================
-; Section: PROCcaterpillar (lines 380-470)
+; Section: PROCcaterpillar
 ; Pixel-based movement with direct screen memory sprite drawing
 ; 2-pixel movement (always byte-aligned, no odd sprite needed)
 ; Speed: fractional accumulator, ~32px/sec at 50Hz
@@ -529,7 +541,8 @@ GUARD &3000
 
 ; --- draw_season_name ---
 ; Print season/bonus name at top of screen during transition
-; Called from draw_map_row when transition_phase=1 and map_row_idx=32
+; with 2 bonus acorns either side. Called from draw_map_row when
+; transition_phase=1 and map_row_idx=32
 .draw_season_name
     ; Determine name index: 0-3 for seasons, 4 for bonus
     LDX season
@@ -550,7 +563,29 @@ GUARD &3000
     LDA season_name_hi,X
     TAY
     LDX temp1
-    JMP print_string
+    JSR print_string
+    ; Draw 2 bonus acorns either side of season text (spaced)
+    ; Acorn tops (colour 11) at row 1: cols 3, 5, 14, 16
+    LDA #11 : JSR do_colour
+    LDA #3 : LDX #1 : JSR do_tab
+    LDA #248 : JSR OSWRCH
+    LDA #5 : LDX #1 : JSR do_tab
+    LDA #248 : JSR OSWRCH
+    LDA #14 : LDX #1 : JSR do_tab
+    LDA #248 : JSR OSWRCH
+    LDA #16 : LDX #1 : JSR do_tab
+    LDA #248 : JSR OSWRCH
+    ; Acorn bottoms (colour 10) at row 2: cols 3, 5, 14, 16
+    LDA #10 : JSR do_colour
+    LDA #3 : LDX #2 : JSR do_tab
+    LDA #249 : JSR OSWRCH
+    LDA #5 : LDX #2 : JSR do_tab
+    LDA #249 : JSR OSWRCH
+    LDA #14 : LDX #2 : JSR do_tab
+    LDA #249 : JSR OSWRCH
+    LDA #16 : LDX #2 : JSR do_tab
+    LDA #249 : JSR OSWRCH
+    RTS
 
 ; --- check_season ---
 ; Read system timer and determine current season (0-3)
@@ -878,52 +913,44 @@ GUARD &3000
     RTS
 
 ; ============================================================================
-; Section: PROCcrash (lines 820-880)
+; Section: PROCcrash
 ; ============================================================================
 .proc_crash
-    ; FOR P%=-15 TO -1 : SOUND 0,P%,4,1 : NEXT (lines 830-850)
-    ; Amplitude values -15 to -1 (in sound block: &F1 to &FF)
-    LDA #&F1            ; -15
-.crash_loop
-    STA temp0           ; save amplitude
-    ; Build sound block on the fly
-    LDA #0              ; channel 0 (lo)
-    STA osword_blk
-    LDA #0              ; channel 0 (hi)
-    STA osword_blk+1
-    LDA temp0           ; amplitude (lo)
-    STA osword_blk+2
-    LDA #&FF            ; amplitude (hi) - sign extend
-    STA osword_blk+3
-    LDA #4              ; pitch (lo)
-    STA osword_blk+4
-    LDA #0              ; pitch (hi)
-    STA osword_blk+5
-    LDA #1              ; duration (lo)
-    STA osword_blk+6
-    LDA #0              ; duration (hi)
-    STA osword_blk+7
+    ; SOUND 0,amp,4,1 with amp from -15..-1
+    ; Build constant parts of OSWORD 7 block once
+    LDA #0
+    STA osword_blk       ; channel lo
+    STA osword_blk+1     ; channel hi
+    STA osword_blk+5     ; pitch hi
+    STA osword_blk+7     ; duration hi
+    LDA #&FF
+    STA osword_blk+3     ; amplitude hi (sign extend)
+    LDA #4
+    STA osword_blk+4     ; pitch lo
+    LDA #1
+    STA osword_blk+6     ; duration lo
 
+    ; Loop amplitude -15 (&F1) to -1 (&FF)
+    LDA #&F1
+.crash_loop
+    STA osword_blk+2     ; amplitude lo (only changing field)
     LDA #7
     LDX #LO(osword_blk)
     LDY #HI(osword_blk)
     JSR OSWORD
-
-    ; Wait a bit for each sound step
     LDA #19
     JSR OSBYTE
-
-    INC temp0
-    LDA temp0
-    CMP #0              ; when we reach 0 (-1 + 1 = 0), we're done
+    LDA osword_blk+2
+    CLC : ADC #1
+    CMP #0               ; stop when &FF wraps to 0
     BNE crash_loop
 
-    ; *FX15,0 - flush all buffers (line 860)
+    ; *FX15,0 - flush all buffers
     LDA #15
     LDX #0
     JSR OSBYTE
 
-    ; IF S% > T% THEN T% = S% (line 870)
+    ; IF S% > T% THEN T% = S% (update hiscore)
     ; Compare score with high score
     LDA hiscore_lo
     CMP score_lo
@@ -1436,40 +1463,63 @@ NEXT
 ; --- Sound data blocks (8 bytes each) ---
 ; Format: channel(2), amplitude(2), pitch(2), duration(2)
 
-; Hit colour 1 (leaves, 5pts): SOUND 1,-15,5,5
+; Eat sounds use envelope 1 (gulp: descending pitch, quick decay)
+; Hit colour 1 (leaves, 5pts): SOUND 1,1,60,4
 .sound_hit1
-    EQUW 1
-    EQUW -15
-    EQUW 5
-    EQUW 5
+    EQUW 1, 1, 60, 4
 
-; Hit colour 7 (twigs, 10pts): SOUND 1,-15,15,5
+; Hit colour 7 (twigs, 10pts): SOUND 1,1,80,4
 .sound_hit2
-    EQUW 1
-    EQUW -15
-    EQUW 15
-    EQUW 5
+    EQUW 1, 1, 80, 4
 
-; Hit colour 5 (flowers, 15pts): SOUND 1,-15,25,5
+; Hit colour 5 (flowers, 15pts): SOUND 1,1,100,4
 .sound_hit3
-    EQUW 1
-    EQUW -15
-    EQUW 25
-    EQUW 5
+    EQUW 1, 1, 100, 4
 
-; Hit colour 4 (fruits, 20pts): SOUND 1,-15,35,5
+; Hit colour 4 (fruits, 20pts): SOUND 1,1,120,4
 .sound_hit4
-    EQUW 1
-    EQUW -15
-    EQUW 35
-    EQUW 5
+    EQUW 1, 1, 120, 4
 
-; Hit colour 11 (acorns, 50pts): SOUND 1,-15,100,5
+; Hit colour 11 (acorns, 50pts): SOUND 1,2,150,6 (envelope 2: ding)
 .sound_hit5
-    EQUW 1
-    EQUW -15
-    EQUW 100
-    EQUW 5
+    EQUW 1, 2, 150, 6
+
+; Sound envelope 1: gulp effect
+; Params: envelope, step_len, pitch1, pitch2, pitch3, steps1, steps2, steps3,
+;         attack_change, decay_change, sustain_change, release_change,
+;         attack_target, decay_target
+.envelope_data
+    EQUB 1         ; envelope number
+    EQUB 1         ; step length (10ms per step)
+    EQUB -6        ; pitch section 1: descend
+    EQUB 0         ; pitch section 2: hold
+    EQUB 0         ; pitch section 3: hold
+    EQUB 8         ; steps in section 1
+    EQUB 0         ; steps in section 2
+    EQUB 0         ; steps in section 3
+    EQUB 126       ; attack change (fast rise)
+    EQUB -16       ; decay change
+    EQUB 0         ; sustain change
+    EQUB -16       ; release change
+    EQUB 126       ; attack target
+    EQUB 0         ; decay target
+
+; Sound envelope 2: acorn "ding" (pitch rises then falls)
+.envelope2_data
+    EQUB 2         ; envelope number
+    EQUB 1         ; step length (10ms per step)
+    EQUB 8         ; pitch section 1: ascend
+    EQUB -4        ; pitch section 2: slow descend
+    EQUB 0         ; pitch section 3: hold
+    EQUB 5         ; steps in section 1 (rise 40 over 50ms)
+    EQUB 10        ; steps in section 2 (fall 40 over 100ms)
+    EQUB 0         ; steps in section 3
+    EQUB 126       ; attack change (fast rise)
+    EQUB -4        ; decay change (slow fade)
+    EQUB 0         ; sustain change
+    EQUB -8        ; release change
+    EQUB 126       ; attack target
+    EQUB 0         ; decay target
 
 ; --- Season configuration table (8 bytes per season) ---
 ; Format: map_lo, map_hi, map_rows, scroll_div, fruit_char, fruit_colour, pad, pad

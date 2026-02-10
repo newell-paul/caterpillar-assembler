@@ -48,7 +48,10 @@ Loop back to title
 - `&3000-&7FFF` - MODE 2 screen memory
 
 ## Version Bumping
-- **Always bump the version** in `caterpillar.bas` (line 260) after every change, incrementing the patch number by .1 (e.g. v0.9.0 → v0.9.1)
+- **Auto-bumped by git pre-commit hook** (`.git/hooks/pre-commit`)
+- Patch version increments automatically on every commit that includes `caterpillar.asm` or `caterpillar.bas`
+- Updates all 3 locations: `.asm` header, `.bas` REM line, `.bas` title screen
+- **Do NOT manually bump** — the hook handles it
 
 ## Key Conventions
 - MOS calls: OSWRCH (&FFEE), OSBYTE (&FFF4), OSWORD (&FFF1), OSRDCH (&FFE0)
