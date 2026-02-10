@@ -41,9 +41,27 @@ Loop back to title
 - [ ] Speed up after each season/stage
 - [ ] Pixel-perfect collision detection
 
+## Map System
+All 4 seasons share a single base map (`map_base`: 25 mushrooms, 25 fruits, 6 acorns).
+Per-season variation via two config values in `season_config` (bytes 6-7):
+
+- **col_offset** (0-19) — shifts all item columns right, wrapping at 20
+- **item_skip** (1-N) — draw every Nth item (1=all, 2=every other, 3=every 3rd)
+
+```
+Season   col_offset   item_skip   Items drawn   Difficulty
+------   ----------   ---------   -----------   ----------
+Autumn   5            3           ~19           Sparse
+Winter   10           2           ~28           Moderate
+Spring   15           1           56            Dense
+Summer   0            1           56            Full
+```
+
+Mushroom columns in base map avoid {4,9,14,19} so no cap overflows column 19 after offset.
+
 ## Memory Layout
-- `&0060-&009F` - Zero page variables (position, score, PRNG, game_result)
-- `&1900-&251C` - Assembly game engine code + data
+- `&0060-&009F` - Zero page variables (position, score, game_result)
+- `&1900-&2335` - Assembly game engine code + data
 - `&2800-&2FFF` - BASIC program (PAGE=&2800, HIMEM=&3000)
 - `&3000-&7FFF` - MODE 2 screen memory
 
@@ -57,14 +75,12 @@ Loop back to title
 - MOS calls: OSWRCH (&FFEE), OSBYTE (&FFF4), OSWORD (&FFF1), OSRDCH (&FFE0)
 - 16-bit values: little-endian (lo byte first)
 - Branch-out-of-range: invert condition + JMP
-- PRNG: 16-bit Galois LFSR seeded from system timer (BASIC pokes &78/&79 before CALL)
 - Game speed: 1x OSBYTE 19 (vsync) per frame (50Hz capable, scroll rate controlled by scroll_div)
 - Score at &74/&75, hiscore at &76/&77 (read by BASIC after CALL returns)
 - Game result at &9F (0=crash, 1=completed)
 
 ## Common Pitfalls
 - 6502 branches limited to ±127 bytes (use inverted condition + JMP for long jumps)
-- LFSR: store shifted low byte BEFORE `ROL rng_hi`
 - 16-bit "greater than": compare against N+1 with SEC/SBC
 - BASIC program + variables must fit below &3000 (MODE 2 screen memory)
 - Assembly returns to BASIC via saved stack pointer (TSX/TXS pattern)

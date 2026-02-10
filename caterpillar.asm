@@ -1,6 +1,6 @@
 ; ============================================================================
-; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.0.3
-; Converted from BBC BASIC by Paul Newell with heavily steered assistance from Claude Code (c) 2026
+; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.0.4
+; Converted from BBC BASIC by Paul Newell with some ssistance from Claude Code (c) 2026
 ; Game engine only - title/menu/scores handled by BASIC in MODE 7
 ; ============================================================================
 
@@ -38,8 +38,6 @@ score_lo    = &74      ; current score (low byte)
 score_hi    = &75      ; current score (high byte)
 hiscore_lo  = &76      ; high score (low byte)
 hiscore_hi  = &77      ; high score (high byte)
-rng_lo      = &78      ; PRNG state (low byte)
-rng_hi      = &79      ; PRNG state (high byte)
 temp0       = &7A      ; general temp
 temp1       = &7B      ; general temp
 temp2       = &7C      ; general temp
@@ -61,7 +59,7 @@ copy_ptr_hi  = &9A     ; pointer for body save buffer access (high)
 acorn_state  = &9B     ; 0=waiting for left, 1=waiting for right, 2=done
 acorn_pending = &9C    ; column for pending acorn draw (0=none)
 bonus_phase   = &9D    ; 0=normal play, 1=bonus round (empty+acorns after completion)
-transition_phase = &9E  ; 0=normal play, 1=transitioning between seasons (empty map + name)
+transition_phase = &9E ; 0=normal play, 1=transitioning between seasons (empty map + name)
 game_result   = &9F    ; return code: 0=crash, 1=completed
 
 ; --- Constants ---
@@ -69,7 +67,7 @@ game_result   = &9F    ; return code: 0=crash, 1=completed
 PX_LEFT_BOUND  = 25     ; minimum X pixel (left edge of playfield)
 PX_RIGHT_BOUND = 134    ; maximum X pixel (right edge, sprite is 8+1px wide)
 PX_CAT_INIT_X  = 76     ; starting X pixel position (must be even for 2px movement)
-PX_CAT_INIT_Y  = 200    ; starting Y pixel position (row 25 = 7th from bottom)
+PX_CAT_INIT_Y  = 192    ; starting Y pixel position (row 24 = 8th from bottom)
 MOVE_ACCUM     = 164    ; fractional speed: 164/256 * 50Hz ≈ 32px/sec
 BODY_MAX       = 5      ; max body segments in ring buffer (eviction at row 30)
 
@@ -132,7 +130,7 @@ GUARD &3000
     LDA #PX_CAT_INIT_Y
     STA cat_px_y
 
-    ; Zero game state: &66-&75 (skipping hiscore &76-&77, rng &78-&79)
+    ; Zero game state: &66-&75 (skipping hiscore &76-&77)
     LDA #0
     LDX #(&75 - &66)
 .zi_loop1
@@ -153,18 +151,6 @@ GUARD &3000
 
     ; TIME=0 - reset system timer via OSWORD 2
     JSR reset_time
-
-    ; Seed PRNG from system timer if not already seeded
-    LDA rng_lo
-    ORA rng_hi
-    BNE game_loop           ; already seeded
-    ; Read timer for seed
-    JSR read_time
-    LDA osword_blk
-    ORA #1                  ; ensure non-zero
-    STA rng_lo
-    LDA osword_blk+1
-    STA rng_hi
 
 ; ============================================================================
 ; Section: Main Game Loop
@@ -203,6 +189,7 @@ GUARD &3000
     LDA map_base_lo : STA map_ptr_lo
     LDA map_base_hi : STA map_ptr_hi
     LDA #0 : STA map_row_idx
+    LDA item_skip : STA item_counter  ; reset skip counter for new cycle
     JMP after_scroll
 .transition_done
     LDA #0 : STA transition_phase
@@ -259,6 +246,11 @@ GUARD &3000
     STA collision_key_prev
 .ck_debounce
 .ck_done
+    ; Queue movement tick (channel 2, very quiet, ~12.5Hz walking rhythm)
+    LDA #7
+    LDX #LO(sound_tick)
+    LDY #HI(sound_tick)
+    JSR OSWORD
 
 .skip_slow_path
     JMP game_loop
@@ -525,6 +517,11 @@ GUARD &3000
     STA fruit_char
     LDA season_config+5,X
     STA fruit_col
+    LDA season_config+6,X
+    STA col_offset
+    LDA season_config+7,X
+    STA item_skip
+    STA item_counter     ; prime counter so first item draws
     LDA #0
     STA map_row_idx
     STA acorn_state      ; reset acorn counter for this season
@@ -679,6 +676,33 @@ GUARD &3000
     INY
     STY temp3
 
+    STA temp2               ; save type_col before skip check clobbers A
+
+    ; --- Item skip check (draw every Nth item, evenly distributed) ---
+    LDA item_counter
+    SEC
+    SBC #1
+    BEQ dmr_draw_item       ; reached zero -> draw this item
+    STA item_counter        ; save decremented counter
+    JMP dmr_next_item       ; skip this item
+.dmr_draw_item
+    LDA item_skip
+    STA item_counter        ; reset counter for next item
+
+    ; --- Apply column offset ---
+    LDA temp2               ; restore type_col
+    AND #&1F                ; extract column (0-19)
+    CLC
+    ADC col_offset
+    CMP #20
+    BCC dmr_no_col_wrap
+    SBC #20                 ; carry is set from CMP, so SBC #20 is correct
+.dmr_no_col_wrap
+    STA temp0               ; adjusted column
+    LDA temp2
+    AND #&60                ; type bits only
+    ORA temp0               ; reconstruct type_col with new column
+
     ; Determine item type
     CMP #&40
     BCS dmr_acorn       ; >= &40: acorn
@@ -784,6 +808,7 @@ GUARD &3000
     JSR send_vdu_seq
 
     ; VDU 30 : VDU 11 - home cursor then cursor up (triggers hardware scroll)
+    ; VDU 11 effect is also used in my original game and cause the body ripple effect
     LDA #30
     JSR OSWRCH
     LDA #11
@@ -856,7 +881,7 @@ GUARD &3000
     LDA #0 : JSR do_colour       ; text colour 0 (black)
     LDA cat_px_x
     LSR A : LSR A : LSR A        ; A = text column of sprite left edge
-    LDX #25                      ; text row (caterpillar visual row)
+    LDX #24                      ; text row (caterpillar visual row)
     JSR do_tab                   ; VDU 31, col, 25
     LDA #32 : JSR OSWRCH         ; space 1 (left half)
     LDA #32 : JSR OSWRCH         ; space 2 (right half)
@@ -1334,6 +1359,11 @@ GUARD &3000
 .collision_key_prev
     EQUB 0              ; previous C key state (for edge detection)
 
+; --- Map compression variables ---
+.col_offset       EQUB 0   ; column offset for current season (0-19)
+.item_skip        EQUB 0   ; draw every Nth item (1=all, 2=every other, 3=every 3rd)
+.item_counter     EQUB 0   ; countdown to next item draw (reset to item_skip)
+
 ; --- Sprite save buffer (40 bytes for 5 byte-columns x 8 rows) ---
 .save_buffer
     SKIP 40
@@ -1480,9 +1510,13 @@ NEXT
 .sound_hit4
     EQUW 1, 1, 120, 4
 
-; Hit colour 11 (acorns, 50pts): SOUND 1,2,150,6 (envelope 2: ding)
+; Hit colour 11 (acorns, 50pts): SOUND 1,1,30,6 (envelope 1: deep gulp)
 .sound_hit5
-    EQUW 1, 2, 150, 6
+    EQUW 1, 1, 30, 6
+
+; Movement tick: SOUND 0,-2,4,1 (noise channel, quiet, periodic low buzz tick)
+.sound_tick
+    EQUW 0, -2, 4, 1
 
 ; Sound envelope 1: gulp effect
 ; Params: envelope, step_len, pitch1, pitch2, pitch3, steps1, steps2, steps3,
@@ -1522,107 +1556,49 @@ NEXT
     EQUB 0         ; decay target
 
 ; --- Season configuration table (8 bytes per season) ---
-; Format: map_lo, map_hi, map_rows, scroll_div, fruit_char, fruit_colour, pad, pad
+; Format: map_lo, map_hi, map_rows, scroll_div, fruit_char, fruit_colour, col_offset, item_skip
+; All seasons share map_base. col_offset shifts columns, item_skip draws every Nth item.
 .season_config
-    EQUB LO(map_autumn), HI(map_autumn), 64, 2, 246, 1, 0, 0   ; Autumn: leaf (chr246), red
-    EQUB LO(map_winter), HI(map_winter), 64, 2, 247, 7, 0, 0   ; Winter: twig (chr247), white
-    EQUB LO(map_spring), HI(map_spring), 64, 2, 245, 5, 0, 0   ; Spring: flower (chr245), magenta
-    EQUB LO(map_summer), HI(map_summer), 64, 2, 241, 4, 0, 0   ; Summer: fruit (chr241), blue
+    EQUB LO(map_base), HI(map_base), 64, 2, 246, 1, 5, 3      ; Autumn: every 3rd item, offset 5
+    EQUB LO(map_base), HI(map_base), 64, 2, 247, 7, 10, 2     ; Winter: every 2nd item, offset 10
+    EQUB LO(map_base), HI(map_base), 64, 2, 245, 5, 15, 1     ; Spring: all items, offset 15
+    EQUB LO(map_base), HI(map_base), 64, 2, 241, 4, 0, 1      ; Summer: all items, no offset
 
 ; ============================================================================
-; Section: Map Data (4 seasons x 64 rows each)
+; Section: Map Data (single base map shared by all seasons)
 ; Pair format: row_number, type_col, ... &FF sentinel
 ; Item encoding (type_col byte):
 ;   &00-&13: mushroom at column 0-19
 ;   &20-&33: season fruit at column 0-19
 ;   &40-&53: acorn at column 0-19
 ; Empty rows need no data (parser skips rows with no matching pairs)
+; All seasons use map_base with per-season col_offset and item_limit
 ; ============================================================================
 
-; --- Autumn map (32 items, 65 bytes) ---
-.map_autumn
-    EQUB 2, &03, 4, &25, 6, &0E
-    EQUB 9, &22, 10, &05, 12, &2C, 14, &10
-    EQUB 17, &02, 17, &0B, 19, &27
-    EQUB 21, &08, 23, &2F, 25, &12
-    EQUB 28, &06, 30, &24, 32, &0D
-    EQUB 35, &01, 37, &2A, 39, &0F
-    EQUB 42, &04, 42, &10, 44, &29
-    EQUB 46, &09, 49, &2D, 50, &07
-    EQUB 52, &44, 53, &11, 55, &23
-    EQUB 57, &0A, 60, &03, 60, &0F
-    EQUB 62, &2B, &FF
-
-; --- Winter map (47 items, 95 bytes) ---
-.map_winter
-    EQUB 0, &02, 2, &0A, 4, &26
-    EQUB 5, &05, 5, &0E, 7, &10
-    EQUB 9, &03, 10, &2C, 11, &09
-    EQUB 13, &01, 13, &0C
-    EQUB 17, &11, 18, &28, 19, &04
-    EQUB 21, &0D, 23, &08, 23, &12
-    EQUB 25, &22, 26, &0B, 28, &06
-    EQUB 30, &0F, 31, &2E
-    EQUB 32, &02, 32, &0A, 34, &12
-    EQUB 36, &05, 37, &2A, 38, &0E
-    EQUB 40, &01, 40, &09, 42, &0C
-    EQUB 44, &24, 45, &07, 45, &10
-    EQUB 49, &0B, 50, &30
-    EQUB 51, &06, 51, &11, 52, &50
-    EQUB 53, &0D, 55, &04
-    EQUB 57, &08, 57, &0F, 59, &26
-    EQUB 60, &10, 62, &02, 62, &0B
+; --- Base map (56 items, 113 bytes) - shared by all seasons ---
+; 25 mushrooms, 25 fruits, 6 acorns - balanced mix
+; Mushroom columns avoid {4,9,14,19} to prevent cap overflow after any offset
+.map_base
+    EQUB 0, &03, 0, &2F, 2, &28
+    EQUB 4, &06, 4, &10, 6, &4C
+    EQUB 8, &23, 8, &0F, 10, &07, 10, &32
+    EQUB 12, &21, 12, &2D, 14, &0A
+    EQUB 16, &45, 18, &02, 18, &2D
+    EQUB 20, &27, 20, &11, 22, &0B, 22, &23
+    EQUB 24, &28, 24, &10, 26, &53
+    EQUB 28, &01, 28, &2C, 30, &27, 30, &0F
+    EQUB 32, &03, 32, &31, 34, &2A, 34, &0D
+    EQUB 36, &46, 38, &05, 38, &32
+    EQUB 40, &22, 40, &0D, 42, &08, 42, &30
+    EQUB 44, &25, 44, &11, 46, &4A
+    EQUB 48, &06, 48, &2F, 50, &21, 50, &0C
+    EQUB 52, &0A, 52, &33, 53, &43
+    EQUB 54, &27, 56, &05, 56, &30
+    EQUB 58, &2B, 58, &12, 60, &08, 60, &32
+    EQUB 62, &22, 62, &10
     EQUB &FF
 
-; --- Spring map (45 items, 91 bytes) ---
-.map_spring
-    EQUB 0, &03, 2, &0E, 4, &07
-    EQUB 5, &2B, 7, &02, 7, &10
-    EQUB 9, &0A, 11, &05, 11, &0F
-    EQUB 13, &09, 17, &25, 18, &06
-    EQUB 20, &0C, 22, &04, 22, &11
-    EQUB 24, &08, 26, &03, 26, &0E
-    EQUB 28, &0B, 29, &2F
-    EQUB 31, &06, 31, &12
-    EQUB 33, &02, 33, &0F, 35, &09
-    EQUB 37, &05, 37, &10, 39, &23
-    EQUB 40, &0A, 42, &01, 42, &0D
-    EQUB 44, &07, 48, &0C, 49, &2D
-    EQUB 51, &08, 51, &0E, 52, &45
-    EQUB 53, &03, 55, &0B, 55, &10
-    EQUB 57, &06, 59, &27
-    EQUB 60, &02, 60, &0F, 62, &09
-    EQUB &FF
-
-; --- Summer map (61 items, 123 bytes) ---
-.map_summer
-    EQUB 0, &02, 0, &0E, 2, &08
-    EQUB 4, &05, 4, &11, 5, &25
-    EQUB 6, &0B, 8, &03, 8, &0F
-    EQUB 10, &07, 10, &12
-    EQUB 12, &01, 12, &0D, 13, &2B
-    EQUB 14, &09, 18, &0A
-    EQUB 20, &06, 20, &0E
-    EQUB 22, &02, 22, &0B, 23, &22
-    EQUB 24, &08, 24, &10
-    EQUB 26, &05, 26, &0D
-    EQUB 28, &01, 28, &0F, 29, &2F
-    EQUB 30, &09, 32, &03, 32, &0C
-    EQUB 34, &07, 34, &11, 36, &0A
-    EQUB 37, &27, 38, &04, 38, &0E
-    EQUB 40, &02, 40, &0B
-    EQUB 42, &06, 42, &10
-    EQUB 44, &08, 44, &12
-    EQUB 48, &05, 48, &0F
-    EQUB 50, &01, 50, &0B, 51, &4F
-    EQUB 52, &07, 52, &10, 53, &24
-    EQUB 54, &0C, 56, &04, 56, &0E
-    EQUB 58, &09, 58, &12, 59, &2E
-    EQUB 60, &06, 60, &0F
-    EQUB 62, &02, 62, &0B
-    EQUB &FF
-
-; --- Bonus map (16 items, 33 bytes) ---
+; --- Bonus map  ---
 .map_bonus
     EQUB 0, &44, 2, &4D, 4, &48
     EQUB 6, &42, 8, &4F, 10, &46
