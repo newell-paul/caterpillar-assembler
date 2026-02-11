@@ -1,5 +1,5 @@
 ; ============================================================================
-; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.0.6
+; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.0.7
 ; Converted from BBC BASIC by Paul Newell with some ssistance from Claude Code (c) 2026
 ; Game engine only - title/menu/scores handled by BASIC in MODE 7
 ; ============================================================================
@@ -129,7 +129,7 @@ GUARD &3000
     BNE clear_scr
 
     ; Wait for vsync then switch mode (screen memory is now zeroed)
-    LDA #19 : JSR OSBYTE
+    JSR vsync_wait
 
     ; MODE 2 + disable cursor + VDU 5 (table-driven)
     LDX #LO(vdu_init_data)
@@ -172,7 +172,7 @@ GUARD &3000
     DEX
     BPL zi_loop2
     ; A is still 0 from loop
-    LDA #0 : STA acorn_score
+    STA acorn_score
     STA collision_key_prev
     LDA #1 : STA collision_on
     LDA #2 : STA scroll_div : STA scroll_count  ; initial scroll speed
@@ -185,7 +185,7 @@ GUARD &3000
 ; ============================================================================
 .game_loop
     ; Wait for 1 vsync (50Hz for smooth pixel movement)
-    LDA #19 : JSR OSBYTE
+    JSR vsync_wait
 
     ; Increment frame counter
     INC anim_frame
@@ -219,7 +219,7 @@ GUARD &3000
     LDA map_base_lo : STA map_ptr_lo
     LDA map_base_hi : STA map_ptr_hi
     LDA #0 : STA map_row_idx
-    LDA #0 : STA item_counter  ; reset skip counter for new cycle
+    STA item_counter            ; reset skip counter for new cycle
     JMP after_scroll
 .season_done
     INC season
@@ -597,9 +597,8 @@ GUARD &3000
     ; COLOUR 6 (cyan, same as caterpillar - no collision conflict)
     LDA #6
     JSR do_colour
-    ; TAB(season_tab_col, 1) - centred for variable-length names
-    LDX temp0
-    LDA season_tab_col,X
+    ; TAB(4, 1) - centred near top of screen
+    LDA #4
     LDX #1 : JSR do_tab
     ; Print season name string
     LDX temp0
@@ -608,8 +607,7 @@ GUARD &3000
     LDA season_name_hi,X
     TAY
     LDX temp1
-    JSR print_string
-    RTS
+    JMP print_string      ; tail call
 
 ; --- check_acorn_letter ---
 ; Check if caterpillar is at the target ACORN letter column during transition.
@@ -956,8 +954,8 @@ GUARD &3000
     PHA                 ; save points
     ; Hit-stop: freeze 2 frames for kinetic "gulp" feel
     STX temp0 : STY temp1
-    LDA #19 : JSR OSBYTE
-    LDA #19 : JSR OSBYTE
+    JSR vsync_wait
+    JSR vsync_wait
     LDX temp0 : LDY temp1
     ; Play sound
     LDA #7
@@ -998,12 +996,10 @@ GUARD &3000
     LDX #LO(osword_blk)
     LDY #HI(osword_blk)
     JSR OSWORD
-    LDA #19
-    JSR OSBYTE
+    JSR vsync_wait
     LDA osword_blk+2
     CLC : ADC #1
-    CMP #0               ; stop when &FF wraps to 0
-    BNE crash_loop
+    BNE crash_loop       ; Z flag set by ADC when &FF wraps to 0
 
     ; *FX15,0 - flush all buffers
     LDA #15
@@ -1095,6 +1091,12 @@ GUARD &3000
     CPY temp2
     BNE svs_loop
     RTS
+
+; --- vsync_wait ---
+; Wait for vertical sync (OSBYTE 19)
+.vsync_wait
+    LDA #19
+    JMP OSBYTE
 
 ; --- print_string ---
 ; Print null-terminated string
@@ -1490,8 +1492,8 @@ NEXT
     EQUB &A8   ; colour 14 = 1110 -> 1.1.1.0. = &A8
     EQUB &AA   ; colour 15 = 1111 -> 1.1.1.1. = &AA
 
-; --- Character bitmap data (chars 240-250) ---
-; 11 characters x 8 bytes = 88 bytes
+; --- Character bitmap data (chars 240-249) ---
+; 10 characters x 8 bytes = 80 bytes
 .char_data
     ; CHR$240 - caterpillar body
     EQUB 153, 90, 24, 219, 90, 219, 90, 219
@@ -1652,8 +1654,6 @@ NEXT
     EQUB LO(str_autumn), LO(str_winter), LO(str_spring), LO(str_summer), LO(str_bonus)
 .season_name_hi
     EQUB HI(str_autumn), HI(str_winter), HI(str_spring), HI(str_summer), HI(str_bonus)
-.season_tab_col
-    EQUB 4, 4, 4, 4, 4   ; TAB start column for centred name display
 .acorn_target_col
     EQUB 4, 11, 13, 11, 6 ; target columns spelling ACORN (A=4,C=11,O=13,R=11,N=6)
 .acorn_bit_table
