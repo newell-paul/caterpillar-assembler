@@ -1,5 +1,5 @@
 ; ============================================================================
-; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.0.7
+; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.0.8
 ; Converted from BBC BASIC by Paul Newell with some ssistance from Claude Code (c) 2026
 ; Game engine only - title/menu/scores handled by BASIC in MODE 7
 ; ============================================================================
@@ -14,8 +14,7 @@ OSWORD  = &FFF1
 ; Using &60-&9F for game variables
 scr_addr_lo = &60      ; screen address (low byte) - calc_screen_addr result
 scr_addr_hi = &61      ; screen address (high byte)
-sprite_ptr_lo = &62    ; sprite data pointer (low byte)
-sprite_ptr_hi = &63    ; sprite data pointer (high byte)
+                       ; &62-&63 free
 cat_px_x    = &64      ; caterpillar pixel X (0-159)
 cat_px_y    = &65      ; caterpillar pixel Y (0-255)
 anim_frame  = &66      ; animation frame counter
@@ -25,7 +24,7 @@ prev_scr_lo  = &69     ; previous sprite screen address lo
 prev_scr_hi  = &6A     ; previous sprite screen address hi
 prev_scanline = &6B    ; previous sprite starting scanline (py AND 7)
 scroll_py     = &6C    ; hardware scroll offset in pixels (0-255, wraps)
-prev_px_x     = &6D    ; previous pixel X (for body sprite alignment)
+                       ; &6D free
 prev_scroll_py = &6E   ; scroll_py at last head draw (for change detection)
 acorn_word  = &9C      ; bitmask of collected ACORN letters (bits 0-4) - must be &90+ to survive BASIC
 
@@ -60,7 +59,7 @@ body_rdidx   = &98     ; ring buffer read index (oldest slot)
 copy_ptr_lo  = &99     ; pointer for body save buffer access (low)
 copy_ptr_hi  = &9A     ; pointer for body save buffer access (high)
 acorn_col_idx = &9B    ; rotating index into acorn_col_table (0-3)
-acorn_pending = &6F    ; column for pending acorn draw (0=none, unused)
+                       ; &6F free
 bonus_phase   = &9D    ; 0=normal play, 1=bonus round (empty+acorns after completion)
 transition_phase = &9E ; 0=normal play, 1=transitioning between seasons (empty map + name)
 game_result   = &9F    ; return code: 0=crash, 1=completed
@@ -261,7 +260,7 @@ GUARD &3000
     BNE ck_not_pressed
     ; C is pressed - was it pressed last frame?
     LDA collision_key_prev
-    BNE ck_debounce         ; already held, don't toggle again
+    BNE ck_done             ; already held, don't toggle again
     ; Key-down edge: toggle collision_on
     LDA collision_on
     EOR #1
@@ -272,7 +271,6 @@ GUARD &3000
 .ck_not_pressed
     LDA #0
     STA collision_key_prev
-.ck_debounce
 .ck_done
     ; Queue movement tick (channel 2, very quiet, ~12.5Hz walking rhythm)
     LDA #7
@@ -398,7 +396,6 @@ GUARD &3000
     LDA scr_addr_lo : STA prev_scr_lo
     LDA scr_addr_hi : STA prev_scr_hi
     LDA temp0 : STA prev_scanline
-    LDA cat_px_x : STA prev_px_x
     LDA scroll_py : STA prev_scroll_py
 
     ; Save background under new position, check collision, then draw head
@@ -430,15 +427,15 @@ GUARD &3000
     LDA prev_scanline
     STA body_scanln,X
 
-    ; Set up copy_ptr to point to body_save_N (wridx * 40)
+    ; Set up copy_ptr to point to body_save_N (wridx * 32)
     ; Lookup from table for speed
     LDA body_buf_addr_lo,X
     STA copy_ptr_lo
     LDA body_buf_addr_hi,X
     STA copy_ptr_hi
 
-    ; Copy 40 bytes from save_buffer to (copy_ptr)
-    LDY #39
+    ; Copy 32 bytes from save_buffer to (copy_ptr)
+    LDY #31
 .abs_copy_loop
     LDA save_buffer,Y
     STA (copy_ptr_lo),Y
@@ -479,9 +476,9 @@ GUARD &3000
     LDA body_buf_addr_hi,X
     STA copy_ptr_hi
 
-    ; Restore 40 bytes (5 cols x 8 rows) to screen from body buffer
-    ; Uses copy_ptr as sequential read pointer (advanced by 5 each row)
-    ; Y is swapped between buffer offset (0-4) and screen offset (0,8,16,24,32)
+    ; Restore 32 bytes (4 cols x 8 rows) to screen from body buffer
+    ; Uses copy_ptr as sequential read pointer (advanced by 4 each row)
+    ; Y is swapped between buffer offset (0-3) and screen offset (0,8,16,24)
     LDA #8
     STA temp1           ; row counter
 .eob_row_loop
@@ -504,15 +501,10 @@ GUARD &3000
     LDA (copy_ptr_lo),Y
     LDY #24
     STA (scr_addr_lo),Y
-    ; Byte 4: buffer[4] -> screen+32
-    LDY #4
-    LDA (copy_ptr_lo),Y
-    LDY #32
-    STA (scr_addr_lo),Y
-    ; Advance copy_ptr by 5
+    ; Advance copy_ptr by 4
     CLC
     LDA copy_ptr_lo
-    ADC #5
+    ADC #4
     STA copy_ptr_lo
     BCC eob_no_ptr_wrap
     INC copy_ptr_hi
@@ -736,6 +728,7 @@ GUARD &3000
     LDA temp2
     AND #&60                ; type bits only
     ORA temp0               ; reconstruct type_col with new column
+    STA temp2               ; write back so offset is used by drawing code
 
 .dmr_no_offset
     ; Acorns arrive here with original type_col in temp2 (no offset applied)
@@ -869,40 +862,29 @@ GUARD &3000
     BNE pch_active
     RTS
 .pch_active
-    ; Scan all 40 save_buffer bytes for any non-black left pixel
-    LDX #39
-    LDA #0
+    ; Scan save_buffer for first non-black left pixel (early exit)
+    LDX #31
 .pch_scan
-    ORA save_buffer,X
+    LDA save_buffer,X
+    AND #&AA            ; isolate left pixel bits
+    BNE pch_has_colour  ; found a coloured pixel
     DEX
     BPL pch_scan
-    ; A = OR of all 40 bytes; if zero, nothing under sprite
-    AND #&AA            ; isolate left pixel bits
-    BNE pch_has_colour
     RTS                 ; all black = no collision
 .pch_has_colour
-    ; Reverse lookup: find logical colour from left pixel bits
-    LDX #15
-.pch_find
-    CMP colour_left,X
-    BEQ pch_found
-    DEX
-    BPL pch_find
-    RTS                 ; no match (mixed colours from OR, rare)
-.pch_found
-    ; X = logical colour (0-15)
-    ; Check for colour 2 (mushroom cap) or 3 (mushroom stem) = crash
-    CPX #2
+    ; A = left-pixel byte; compare directly against MODE 2 colour encodings
+    ; Crash colours (mushroom cap/stem)
+    CMP #&08            ; colour 2 (green = mushroom cap)
     BEQ is_crash
-    CPX #3
+    CMP #&0A            ; colour 3 (yellow = mushroom stem)
     BNE not_crash
 .is_crash
     JMP proc_crash
 .not_crash
     ; Eat the item: zero save_buffer, clear from screen via VDU, then score
-    TXA : PHA           ; save colour on stack
+    PHA                 ; save left-pixel byte
     ; Zero save_buffer so future background restore writes black
-    LDA #0 : LDX #39
+    LDA #0 : LDX #31
 .clear_sb
     STA save_buffer,X
     DEX
@@ -918,29 +900,29 @@ GUARD &3000
     LDA #32 : JSR OSWRCH         ; space 1 (left half)
     LDA #32 : JSR OSWRCH         ; space 2 (right half)
     LDA #5 : JSR OSWRCH          ; VDU 5 - back to graphics cursor
-    ; Restore colour and score
-    PLA : TAX
-    CPX #1
+    ; Dispatch score by left-pixel byte (MODE 2 colour encoding)
+    PLA
+    CMP #&02            ; colour 1 (red = leaf, 5 pts)
     BNE not_col1
     LDX #LO(sound_hit1) : LDY #HI(sound_hit1) : LDA #5
     JMP add_score_and_sound
 .not_col1
-    CPX #7
+    CMP #&2A            ; colour 7 (white = twig, 10 pts)
     BNE not_col7
     LDX #LO(sound_hit2) : LDY #HI(sound_hit2) : LDA #10
     JMP add_score_and_sound
 .not_col7
-    CPX #5
+    CMP #&22            ; colour 5 (magenta = flower, 15 pts)
     BNE not_col5
     LDX #LO(sound_hit3) : LDY #HI(sound_hit3) : LDA #15
     JMP add_score_and_sound
 .not_col5
-    CPX #4
+    CMP #&20            ; colour 4 (blue = fruit, 20 pts)
     BNE not_col4
     LDX #LO(sound_hit4) : LDY #HI(sound_hit4) : LDA #20
     JMP add_score_and_sound
 .not_col4
-    CPX #11
+    CMP #&8A            ; colour 11 (bright yellow = acorn)
     BNE no_hit
     LDA acorn_score : CLC : ADC #10 : STA acorn_score
     LDX #LO(sound_hit5) : LDY #HI(sound_hit5)
@@ -1260,8 +1242,8 @@ GUARD &3000
     RTS
 
 ; --- save_background ---
-; Save 5 byte-columns (40 bytes) of screen data into save_buffer
-; Always saves 5 cols to support both even (4-col) and odd (5-col) sprites
+; Save 4 byte-columns (32 bytes) of screen data into save_buffer
+; Sprite is always even-aligned (2px movement), so 4 cols covers the full 8px width
 ; Entry: scr_addr_lo/hi = top-left screen address
 ;        temp0 = starting scanline (py AND 7)
 ; Clobbers: A, X, Y, temp0, temp1
@@ -1270,7 +1252,7 @@ GUARD &3000
     LDA #8              ; row counter
     STA temp1
 .sb_row_loop
-    ; Read 5 bytes at offsets 0, 8, 16, 24, 32
+    ; Read 4 bytes at offsets 0, 8, 16, 24
     LDY #0
     LDA (scr_addr_lo),Y
     STA save_buffer,X
@@ -1287,17 +1269,13 @@ GUARD &3000
     LDA (scr_addr_lo),Y
     STA save_buffer,X
     INX
-    LDY #32
-    LDA (scr_addr_lo),Y
-    STA save_buffer,X
-    INX
     JSR advance_scanline
     DEC temp1
     BNE sb_row_loop
     RTS
 
 ; --- restore_background ---
-; Restore 5 byte-columns (40 bytes) from save_buffer to screen
+; Restore 4 byte-columns (32 bytes) from save_buffer to screen
 ; Entry: scr_addr_lo/hi = top-left screen address (same as when saved)
 ;        temp0 = starting scanline (py AND 7)
 ; Clobbers: A, X, Y, temp0, temp1
@@ -1319,10 +1297,6 @@ GUARD &3000
     STA (scr_addr_lo),Y
     INX
     LDY #24
-    LDA save_buffer,X
-    STA (scr_addr_lo),Y
-    INX
-    LDY #32
     LDA save_buffer,X
     STA (scr_addr_lo),Y
     INX
@@ -1390,9 +1364,9 @@ GUARD &3000
 .item_skip        EQUB 0   ; skip every Nth mushroom (0=none, 2=every 2nd, 3=every 3rd)
 .item_counter     EQUB 0   ; counts up, resets at item_skip (skip that mushroom)
 
-; --- Sprite save buffer (40 bytes for 5 byte-columns x 8 rows) ---
+; --- Sprite save buffer (32 bytes for 4 byte-columns x 8 rows) ---
 .save_buffer
-    SKIP 40
+    SKIP 32
 
 ; --- Body ring buffer data ---
 ; Screen address and scanline for each body segment (5 slots)
@@ -1403,17 +1377,17 @@ GUARD &3000
 .body_scanln
     SKIP BODY_MAX
 
-; Save buffers for body segments (40 bytes each, 5 slots = 200 bytes)
+; Save buffers for body segments (32 bytes each, 5 slots = 160 bytes)
 .body_save_0
-    SKIP 40
+    SKIP 32
 .body_save_1
-    SKIP 40
+    SKIP 32
 .body_save_2
-    SKIP 40
+    SKIP 32
 .body_save_3
-    SKIP 40
+    SKIP 32
 .body_save_4
-    SKIP 40
+    SKIP 32
 
 ; Lookup tables: address of each body save buffer (lo/hi)
 .body_buf_addr_lo
@@ -1474,23 +1448,9 @@ NEXT
 ; Right pixel colour table: colour value -> byte with just right pixel set
 ; To make a byte with both pixels: left_table[left_col] OR right_table[right_col]
 
-.colour_left   ; colour in left pixel position (bits 7,5,3,1)
-    EQUB &00   ; colour 0  = 0000 -> 0.0.0.0. = &00
-    EQUB &02   ; colour 1  = 0001 -> 0.0.0.1. = &02
-    EQUB &08   ; colour 2  = 0010 -> 0.0.1.0. = &08
-    EQUB &0A   ; colour 3  = 0011 -> 0.0.1.1. = &0A
-    EQUB &20   ; colour 4  = 0100 -> 0.1.0.0. = &20
-    EQUB &22   ; colour 5  = 0101 -> 0.1.0.1. = &22
-    EQUB &28   ; colour 6  = 0110 -> 0.1.1.0. = &28
-    EQUB &2A   ; colour 7  = 0111 -> 0.1.1.1. = &2A
-    EQUB &80   ; colour 8  = 1000 -> 1.0.0.0. = &80
-    EQUB &82   ; colour 9  = 1001 -> 1.0.0.1. = &82
-    EQUB &88   ; colour 10 = 1010 -> 1.0.1.0. = &88
-    EQUB &8A   ; colour 11 = 1011 -> 1.0.1.1. = &8A
-    EQUB &A0   ; colour 12 = 1100 -> 1.1.0.0. = &A0
-    EQUB &A2   ; colour 13 = 1101 -> 1.1.0.1. = &A2
-    EQUB &A8   ; colour 14 = 1110 -> 1.1.1.0. = &A8
-    EQUB &AA   ; colour 15 = 1111 -> 1.1.1.1. = &AA
+; colour_left table eliminated — proc_checkhit compares left-pixel bytes directly
+; MODE 2 left-pixel encoding: colour bits b3,b2,b1,b0 → byte bits 7,5,3,1
+; Used values: &02(col1) &08(col2) &0A(col3) &20(col4) &22(col5) &2A(col7) &8A(col11)
 
 ; --- Character bitmap data (chars 240-249) ---
 ; 10 characters x 8 bytes = 80 bytes
