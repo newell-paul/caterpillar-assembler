@@ -1,23 +1,19 @@
 # Caterpillar Improvements
 
-### Improvements
-- [ ] multiplier for getting mushrooms. For every acorn the value for the next one goes up by another 50
-  - 50 acorns 
+### Done
+- [x] Cycle-based seasons (6 map cycles per season, fully deterministic)
+- [x] Acorn scoring: incrementing 10, 20, 30, ... per collection
+- [x] Acorn bonus: 2000 points for collecting 16+ acorns across all seasons
+- [x] ACORN letter collection during season transitions (1000 bonus for all 5)
+- [x] Pre-clear screen memory to eliminate MODE 7→2 transition garbage
+- [x] Map compression: single base map with per-season col_offset and item_skip
 
-### Map System
-- [ ] **Seeded procedural generation** (Optional Major Refactor)
-  - Replace static map data with seeded LFSR
-  - Deterministic patterns (learnable like Flappy Bird)
-  - Only consider if static maps become unmaintainable
+### Improvements
+- [ ] Speed up after each season/stage
+- [ ] Pixel-perfect collision detection
 
 ## Known Issues
 
-### Body Trail Flicker
-- Last segment flickers while others are solid
-- Try and move caterpillar up one
-
----
-
 ## Notes
-- Performance is currently acceptable ~16Hz gameplay)
+- Performance is currently acceptable (~16Hz gameplay)
 - Only optimize if new features demand it

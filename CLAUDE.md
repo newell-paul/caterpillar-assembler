@@ -1,6 +1,7 @@
 # Caterpillar - 6502 Assembly
 
-Converting a 1983 BBC BASIC game to native 6502 assembly for BBC Micro Model B.
+Convert a 1983 BBC BASIC game to native 6502 assembly for BBC Micro Model B.
+Relearn some forgotten architecture
 
 ## Quick Start
 ```bash
@@ -36,31 +37,49 @@ Loop back to title
 - `beebasm` - Assembler binary (macOS)
 
 ## Roadmap
-- [ ] Move Caterpillar head up one char
-- [ ] Define challenging repeating mapped scrolling field of mushrooms and items. Ensure items do not overlap
-- [ ] Speed up after each season/stage
-- [ ] Pixel-perfect collision detection
+[ ] Document
+[ ] README.md
+[ ] Deploy (frictionless)
+[ ] Play testers (Will, Billy)
+[ ] Stardot forums
+
+## Seasons
+Cycle-based: each season = exactly 6 map cycles (384 rows). After the 6th cycle wraps,
+`season` increments and `enter_transition` shows the next season name (76 empty scroll rows).
+After season 3 (Summer) completes → `round_over` → bonus phase.
+No system timer — fully deterministic, same gameplay every run.
+
+`map_cycle` (ZP &79) counts 0–5, reset to 0 by `load_season`.
 
 ## Map System
-All 4 seasons share a single base map (`map_base`: 31 mushrooms, 20 fruits, 2 acorns).
+All 4 seasons share a single base map (`map_base`: 33 mushrooms, 14 fruits, 1 acorn).
 Per-season variation via two config values in `season_config` (bytes 6-7):
 
-- **col_offset** (0-19) — shifts all item columns right, wrapping at 20
-- **item_skip** (0-N) — skip every Nth mushroom (0=none). Fruits and acorns always drawn.
+- **col_offset** (0-19) — shifts mushroom/fruit columns right, wrapping at 20
+- **item_skip** (0-N) — skip every Nth mushroom (0=none). Fruits always drawn.
 
-| Season | col_offset | item_skip | Mushrooms | Fruits | Acorns | Difficulty  |
-|--------|------------|-----------|-----------|--------|--------|-------------|
-| Autumn | 5          | 2         | ~16 (50%) | 20     | 2      | Easy        |
-| Winter | 10         | 3         | ~21 (67%) | 20     | 2      | Medium      |
-| Spring | 15         | 4         | ~23 (75%) | 20     | 2      | Medium-hard |
-| Summer | 0          | 0         | 31 (100%) | 20     | 2      | Hard        |
+| Season | col_offset | item_skip | Mushrooms | Fruits | Difficulty  |
+|--------|------------|-----------|-----------|--------|-------------|
+| Autumn | 5          | 2         | ~17 (50%) | 14     | Easy        |
+| Winter | 10         | 3         | ~22 (67%) | 14     | Medium      |
+| Spring | 15         | 4         | ~25 (75%) | 14     | Medium-hard |
+| Summer | 0          | 0         | 33 (100%) | 14     | Hard        |
 
 Mushroom columns in base map avoid {4,9,14,19} so no cap overflows column 19 after offset.
-Acorns at rows 9 and 35, bypass skip check so always drawn regardless of season.
+
+## Acorn System
+One acorn per map cycle at row 59, drawn unconditionally from map data (no timer gating).
+Column rotates via `acorn_col_table` (10, 3, 16, 7) indexed by `acorn_col_idx` (ZP &9B).
+Sequence is fully deterministic — same positions every playthrough.
+
+- **Scoring**: incrementing 10, 20, 30, ... per collection (`acorn_score` at ZP &78)
+- **All-acorn bonus**: collecting 16 acorns (acorn_score=160) awards 2000 points + celebration sound at round_over. 24 acorns available (6 cycles x 4 seasons), so 16 is the threshold.
+- **ACORN letters**: during season transitions, passing over the correct column collects a letter (A/C/O/R/N per season). All 5 letters → 1000 bonus at show_completed.
+- **BASIC display**: `saved_acorn_word` at fixed address &1908 (non-ZP, survives MODE switch). BASIC reads `?&1908` for title screen letter colouring.
 
 ## Memory Layout
 - `&0060-&009F` - Zero page variables (position, score, game_result)
-- `&1900-&2338` - Assembly game engine code + data
+- `&1900-&2356` - Assembly game engine code + data
 - `&2800-&2FFF` - BASIC program (PAGE=&2800, HIMEM=&3000)
 - `&3000-&7FFF` - MODE 2 screen memory
 
@@ -83,3 +102,8 @@ Acorns at rows 9 and 35, bypass skip check so always drawn regardless of season.
 - 16-bit "greater than": compare against N+1 with SEC/SBC
 - BASIC program + variables must fit below &3000 (MODE 2 screen memory)
 - Assembly returns to BASIC via saved stack pointer (TSX/TXS pattern)
+
+## Code Quality
+[ ] Every byte counts. I do not want to lose current functionality but want this expertly coded with accurate and expansive commments for every section so I can learn how this works. Accurately describe each section of the code so reviewers have context.
+[ ] Ideally I want the code excluding comments to be less than 1200 lines
+[ ] Make use of BBC hardware when possible to trim down code but not if there is a large performance hit

@@ -1,5 +1,5 @@
 ; ============================================================================
-; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.0.5
+; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.0.6
 ; Converted from BBC BASIC by Paul Newell with some ssistance from Claude Code (c) 2026
 ; Game engine only - title/menu/scores handled by BASIC in MODE 7
 ; ============================================================================
@@ -27,6 +27,7 @@ prev_scanline = &6B    ; previous sprite starting scanline (py AND 7)
 scroll_py     = &6C    ; hardware scroll offset in pixels (0-255, wraps)
 prev_px_x     = &6D    ; previous pixel X (for body sprite alignment)
 prev_scroll_py = &6E   ; scroll_py at last head draw (for change detection)
+acorn_word  = &9C      ; bitmask of collected ACORN letters (bits 0-4) - must be &90+ to survive BASIC
 
 ; Season/map variables
 map_ptr_lo   = &70     ; pointer to current map row data (low)
@@ -38,6 +39,8 @@ score_lo    = &74      ; current score (low byte)
 score_hi    = &75      ; current score (high byte)
 hiscore_lo  = &76      ; high score (low byte)
 hiscore_hi  = &77      ; high score (high byte)
+acorn_score = &78      ; incrementing acorn value (10, 20, 30, ...)
+map_cycle   = &79      ; current map cycle within season (0-5, advances season at 6)
 temp0       = &7A      ; general temp
 temp1       = &7B      ; general temp
 temp2       = &7C      ; general temp
@@ -50,14 +53,14 @@ scroll_count = &91     ; countdown to next scroll event
 season_rows  = &92     ; rows in current map (e.g. 64)
 map_base_lo  = &93     ; base address of current map (for wrap)
 map_base_hi  = &94     ; base address of current map (for wrap)
-prev_season  = &95     ; previous season (for change detection)
+                       ; &95 free
 body_count   = &96     ; number of body segments in ring buffer (0..BODY_MAX)
 body_wridx   = &97     ; ring buffer write index (next slot to write)
 body_rdidx   = &98     ; ring buffer read index (oldest slot)
 copy_ptr_lo  = &99     ; pointer for body save buffer access (low)
 copy_ptr_hi  = &9A     ; pointer for body save buffer access (high)
-acorn_state  = &9B     ; 0=waiting for left, 1=waiting for right, 2=done
-acorn_pending = &9C    ; column for pending acorn draw (0=none)
+acorn_col_idx = &9B    ; rotating index into acorn_col_table (0-3)
+acorn_pending = &6F    ; column for pending acorn draw (0=none, unused)
 bonus_phase   = &9D    ; 0=normal play, 1=bonus round (empty+acorns after completion)
 transition_phase = &9E ; 0=normal play, 1=transitioning between seasons (empty map + name)
 game_result   = &9F    ; return code: 0=crash, 1=completed
@@ -83,10 +86,20 @@ GUARD &3000
     STX saved_sp
     JMP game_init
 
+; --- Fixed-address data (immediately after JMP, never executed) ---
+; &1907 = saved_sp, &1908 = saved_acorn_word
+; BASIC reads ?&1908 for acorn_word — address won't shift with code changes
+.saved_sp
+    EQUB 0
+.saved_acorn_word
+    EQUB 0
+
 ; ============================================================================
 ; Section: Return to BASIC
 ; ============================================================================
 .return_to_basic
+    LDA acorn_word
+    STA saved_acorn_word  ; copy to non-ZP storage before BASIC can corrupt it
     LDX saved_sp
     TXS               ; restore stack pointer (clean regardless of call depth)
     RTS               ; returns to BASIC's CALL
@@ -100,7 +113,22 @@ GUARD &3000
     LDX #3
     JSR OSBYTE
 
-    ; Wait for vsync before mode switch to avoid transition glitch
+    ; Pre-clear MODE 2 screen memory (&3000-&7BFF) so mode switch
+    ; doesn't flash garbage. Skip &7C00+ (current MODE 7 screen).
+    LDA #0
+    TAY
+    LDX #&30
+    STY &80 : STX &81        ; pointer = &3000
+.clear_scr
+    STA (&80),Y
+    INY
+    BNE clear_scr
+    INC &81
+    LDX &81
+    CPX #&7C
+    BNE clear_scr
+
+    ; Wait for vsync then switch mode (screen memory is now zeroed)
     LDA #19 : JSR OSBYTE
 
     ; MODE 2 + disable cursor + VDU 5 (table-driven)
@@ -144,18 +172,16 @@ GUARD &3000
     DEX
     BPL zi_loop2
     ; A is still 0 from loop
+    LDA #0 : STA acorn_score
     STA collision_key_prev
     LDA #1 : STA collision_on
     LDA #2 : STA scroll_div : STA scroll_count  ; initial scroll speed
     JSR enter_transition ; show "Autumn", load empty transition map
 
-    ; TIME=0 - reset system timer via OSWORD 2
-    JSR reset_time
-
 ; ============================================================================
 ; Section: Main Game Loop
 ; Variable-rate scroll driven by season config. Fast path does vsync + sprite.
-; Slow path (every 4th frame) handles collision and season transitions.
+; Slow path (every 4th frame) handles collision, sound, and input.
 ; ============================================================================
 .game_loop
     ; Wait for 1 vsync (50Hz for smooth pixel movement)
@@ -186,10 +212,21 @@ GUARD &3000
     LDA bonus_phase
     BNE bonus_complete      ; bonus map done -> show completed
     ; Normal play: wrap to start of current map
+    INC map_cycle
+    LDA map_cycle
+    CMP #6
+    BEQ season_done
     LDA map_base_lo : STA map_ptr_lo
     LDA map_base_hi : STA map_ptr_hi
     LDA #0 : STA map_row_idx
     LDA #0 : STA item_counter  ; reset skip counter for new cycle
+    JMP after_scroll
+.season_done
+    INC season
+    LDA season
+    CMP #4
+    BCS round_over
+    JSR enter_transition
     JMP after_scroll
 .transition_done
     LDA #0 : STA transition_phase
@@ -214,16 +251,7 @@ GUARD &3000
 
     ; === Slow path (every 4th frame, ~12.5Hz) ===
 
-    ; In transition or bonus phase, skip season checks
-    LDA transition_phase
-    ORA bonus_phase
-    BNE skip_season_check
-
-    ; Check season transition (timer-based)
-    JSR check_season
-    BCS round_over          ; C=1 means round is over
-
-.skip_season_check
+    ; (Season transitions are now cycle-based, triggered at map wrap)
     ; Check C key toggle (INKEY -83) with edge detection
     LDA #129
     LDX #(256-83)
@@ -256,6 +284,24 @@ GUARD &3000
     JMP game_loop
 
 .round_over
+    ; All 16 season acorns collected? (acorn_score increments by 10 each, 16×10=160)
+    LDA acorn_score
+    CMP #160
+    BNE ro_no_acorn_bonus
+    ; Add 2000 to score
+    CLC
+    LDA score_lo
+    ADC #LO(2000)
+    STA score_lo
+    LDA score_hi
+    ADC #HI(2000)
+    STA score_hi
+    ; Celebration sound
+    LDA #7
+    LDX #LO(sound_celebrate)
+    LDY #HI(sound_celebrate)
+    JSR OSWORD
+.ro_no_acorn_bonus
     ; Enter bonus phase with transition
     LDA #1
     STA bonus_phase
@@ -524,7 +570,7 @@ GUARD &3000
     LDA #0
     STA map_row_idx
     STA item_counter     ; reset skip counter
-    STA acorn_state      ; reset acorn counter for this season
+    STA map_cycle        ; reset cycle counter for new season
     RTS
 
 ; --- enter_transition ---
@@ -551,8 +597,10 @@ GUARD &3000
     ; COLOUR 6 (cyan, same as caterpillar - no collision conflict)
     LDA #6
     JSR do_colour
-    ; TAB(7, 1) - centred near top of screen
-    LDA #7 : LDX #1 : JSR do_tab
+    ; TAB(season_tab_col, 1) - centred for variable-length names
+    LDX temp0
+    LDA season_tab_col,X
+    LDX #1 : JSR do_tab
     ; Print season name string
     LDX temp0
     LDA season_name_lo,X
@@ -561,83 +609,55 @@ GUARD &3000
     TAY
     LDX temp1
     JSR print_string
-    ; Draw 2 bonus acorns either side of season text (spaced)
-    ; Acorn tops (colour 11) at row 1: cols 3, 5, 14, 16
-    LDA #11 : JSR do_colour
-    LDA #3 : LDX #1 : JSR do_tab
-    LDA #248 : JSR OSWRCH
-    LDA #5 : LDX #1 : JSR do_tab
-    LDA #248 : JSR OSWRCH
-    LDA #14 : LDX #1 : JSR do_tab
-    LDA #248 : JSR OSWRCH
-    LDA #16 : LDX #1 : JSR do_tab
-    LDA #248 : JSR OSWRCH
-    ; Acorn bottoms (colour 10) at row 2: cols 3, 5, 14, 16
-    LDA #10 : JSR do_colour
-    LDA #3 : LDX #2 : JSR do_tab
-    LDA #249 : JSR OSWRCH
-    LDA #5 : LDX #2 : JSR do_tab
-    LDA #249 : JSR OSWRCH
-    LDA #14 : LDX #2 : JSR do_tab
-    LDA #249 : JSR OSWRCH
-    LDA #16 : LDX #2 : JSR do_tab
-    LDA #249 : JSR OSWRCH
     RTS
 
-; --- check_season ---
-; Read system timer and determine current season (0-3)
-; Returns: C=1 if round over (TIME >= 7500), C=0 otherwise
-; On season change: calls enter_transition
-.check_season
-    JSR read_time
-    ; Check if round is over: TIME >= 7500
-    LDA osword_blk
-    CMP #LO(7500)
-    LDA osword_blk+1
-    SBC #HI(7500)
-    BCC cs_not_over
-    SEC                 ; round over
+; --- check_acorn_letter ---
+; Check if caterpillar is at the target ACORN letter column during transition.
+; Called at map_row_idx=55 (when season name scrolls past caterpillar row).
+.check_acorn_letter
+    ; Get season/bonus index
+    LDX season
+    LDA bonus_phase
+    BEQ cal_season
+    LDX #4
+.cal_season
+    ; Already collected this letter?
+    LDA acorn_word
+    AND acorn_bit_table,X
+    BNE cal_done
+    ; Check column match: |cat_col - target_col| <= 1 (±1 tolerance)
+    LDA cat_px_x
+    LSR A : LSR A : LSR A
+    SEC
+    SBC acorn_target_col,X
+    CLC
+    ADC #1              ; map -1→0, 0→1, 1→2
+    CMP #3
+    BCS cal_done        ; >= 3 means diff was < -1 or > 1
+    ; Collect letter!
+    LDA acorn_word
+    ORA acorn_bit_table,X
+    STA acorn_word
+    ; Erase letter from screen: name was at row 1 when map_row_idx=32
+    ; Current screen row = map_row_idx - 31
+    LDA acorn_target_col,X
+    STA temp1               ; save target column
+    LDA map_row_idx
+    SEC
+    SBC #31
+    TAX                     ; X = screen row
+    LDA temp1               ; A = column
+    JSR do_tab
+    LDA #32                 ; space character
+    JSR OSWRCH
+    ; Feedback: ding sound
+    LDA #7
+    LDX #LO(sound_letter)
+    LDY #HI(sound_letter)
+    JSR OSWORD
+.cal_done
     RTS
-.cs_not_over
-    ; Determine season from time thresholds
-    ; Season 0 (Autumn): 0-1874 (TIME < 1875)
-    ; Season 1 (Winter): 1875-3749
-    ; Season 2 (Spring): 3750-5624
-    ; Season 3 (Summer): 5625-7499
-    LDA #0              ; default season 0
-    STA temp0
-    ; Check >= 1875
-    LDA osword_blk
-    CMP #LO(1875)
-    LDA osword_blk+1
-    SBC #HI(1875)
-    BCC cs_got_season
-    INC temp0           ; season 1
-    ; Check >= 3750
-    LDA osword_blk
-    CMP #LO(3750)
-    LDA osword_blk+1
-    SBC #HI(3750)
-    BCC cs_got_season
-    INC temp0           ; season 2
-    ; Check >= 5625
-    LDA osword_blk
-    CMP #LO(5625)
-    LDA osword_blk+1
-    SBC #HI(5625)
-    BCC cs_got_season
-    INC temp0           ; season 3
-.cs_got_season
-    ; Check if season changed
-    LDA temp0
-    CMP prev_season
-    BEQ cs_no_change
-    STA season
-    STA prev_season
-    JSR enter_transition    ; show season name, load empty map
-.cs_no_change
-    CLC                 ; not over
-    RTS
+
 
 ; --- draw_map_row ---
 ; Draw items from current map row, then scroll screen
@@ -654,12 +674,19 @@ GUARD &3000
     ; During transition, skip item parsing (no map data to read)
     LDA transition_phase
     BEQ dmr_has_items
-    ; Transition row: check for season name at row 32, then scroll
+    ; Transition row: draw season name at row 32, check ACORN letter at rows 50-60
     LDA map_row_idx
     CMP #32
-    BNE dmr_skip_name
+    BNE dmr_not_32
     JSR draw_season_name
-.dmr_skip_name
+    JMP dmr_no_name
+.dmr_not_32
+    CMP #50
+    BCC dmr_skip_check
+    CMP #61
+    BCS dmr_skip_check
+    JSR check_acorn_letter
+.dmr_skip_check
     JMP dmr_no_name
 .dmr_has_items
 
@@ -678,9 +705,9 @@ GUARD &3000
 
     STA temp2               ; save type_col before skip check clobbers A
 
-    ; Acorns (&40+) bypass the skip check - always drawn when encountered
+    ; Acorns (&40+) bypass skip check AND column offset - fixed landmarks
     CMP #&40
-    BCS dmr_apply_offset
+    BCS dmr_no_offset
 
     ; Fruits (&20+) bypass the skip check - always drawn
     CMP #&20
@@ -712,6 +739,9 @@ GUARD &3000
     AND #&60                ; type bits only
     ORA temp0               ; reconstruct type_col with new column
 
+.dmr_no_offset
+    ; Acorns arrive here with original type_col in temp2 (no offset applied)
+    LDA temp2
     ; Determine item type
     CMP #&40
     BCS dmr_acorn       ; >= &40: acorn
@@ -760,21 +790,16 @@ GUARD &3000
     JMP dmr_next_item
 
 .dmr_acorn
-    ; Acorn: column = item - &40
-    SEC
-    SBC #&40
-    STA temp0           ; column
-    ; In bonus phase, draw all acorns without counting
-    LDA bonus_phase
-    BNE dmr_acorn_draw
-    ; Normal play: limit to 2 acorns per season
-    LDA acorn_state
-    CMP #2
-    BCC dmr_acorn_ok
-    JMP dmr_next_item   ; skip: already had 2 this season
-.dmr_acorn_ok
-    INC acorn_state
-.dmr_acorn_draw
+    ; Pick column from rotating table (varies each map cycle)
+    LDX acorn_col_idx
+    LDA acorn_col_table,X
+    STA temp0
+    INX
+    CPX #4
+    BCC dmr_acorn_no_wrap
+    LDX #0
+.dmr_acorn_no_wrap
+    STX acorn_col_idx
     ; COLOUR 11 (bright yellow)
     LDA #11
     JSR do_colour
@@ -919,7 +944,8 @@ GUARD &3000
 .not_col4
     CPX #11
     BNE no_hit
-    LDX #LO(sound_hit5) : LDY #HI(sound_hit5) : LDA #50
+    LDA acorn_score : CLC : ADC #10 : STA acorn_score
+    LDX #LO(sound_hit5) : LDY #HI(sound_hit5)
     JMP add_score_and_sound
 .no_hit
     RTS
@@ -1007,6 +1033,18 @@ GUARD &3000
 ; Section: Completion (all 4 seasons cleared)
 ; ============================================================================
 .show_completed
+    ; ACORN bonus: if all 5 letters collected, add 1000 points
+    LDA acorn_word
+    CMP #&1F          ; all 5 bits set?
+    BNE sc_no_acorn
+    CLC
+    LDA score_lo
+    ADC #LO(1000)
+    STA score_lo
+    LDA score_hi
+    ADC #HI(1000)
+    STA score_hi
+.sc_no_acorn
     ; Update high score if needed
     LDA hiscore_lo
     CMP score_lo
@@ -1105,27 +1143,6 @@ GUARD &3000
 .as_done
     RTS
 
-; --- reset_time ---
-; Set system timer to 0 (OSWORD 2)
-.reset_time
-    LDA #0
-    STA osword_blk
-    STA osword_blk+1
-    STA osword_blk+2
-    STA osword_blk+3
-    STA osword_blk+4
-    LDA #2
-    LDX #LO(osword_blk)
-    LDY #HI(osword_blk)
-    JMP OSWORD
-
-; --- read_time ---
-; Read system timer (OSWORD 1), result in osword_blk (5 bytes)
-.read_time
-    LDA #1
-    LDX #LO(osword_blk)
-    LDY #HI(osword_blk)
-    JMP OSWORD
 
 ; ============================================================================
 ; Section: Character Definitions
@@ -1358,9 +1375,7 @@ GUARD &3000
 .vdu_row_clear     ; VDU 28,0,30,19,30 + CLS + restore window
     EQUB 28, 0, 30, 19, 30, 12, 26
 
-; --- Saved stack pointer for return to BASIC ---
-.saved_sp
-    EQUB 0
+; saved_sp and saved_acorn_word are at fixed addresses &1907/&1908 (after JMP in entry sequence)
 
 ; --- Collision toggle (C key) ---
 .collision_on
@@ -1527,6 +1542,14 @@ NEXT
 .sound_tick
     EQUW 0, -2, 4, 1
 
+; ACORN letter collected: SOUND 1,2,200,4 (envelope 2 ding, high pitch)
+.sound_letter
+    EQUW 1, 2, 200, 4
+
+; All 8 season acorns collected: SOUND 1,2,250,12 (envelope 2 ding, high pitch, long)
+.sound_celebrate
+    EQUW 1, 2, 250, 12
+
 ; Sound envelope 1: gulp effect
 ; Params: envelope, step_len, pitch1, pitch2, pitch3, steps1, steps2, steps3,
 ;         attack_change, decay_change, sustain_change, release_change,
@@ -1568,10 +1591,10 @@ NEXT
 ; Format: map_lo, map_hi, map_rows, scroll_div, fruit_char, fruit_colour, col_offset, item_skip
 ; All seasons share map_base. col_offset shifts columns, item_skip skips every Nth mushroom (0=none).
 .season_config
-    EQUB LO(map_base), HI(map_base), 64, 2, 246, 1, 5, 2      ; Autumn: skip every 2nd mush (50%), offset 5
-    EQUB LO(map_base), HI(map_base), 64, 2, 247, 7, 10, 3     ; Winter: skip every 3rd mush (67%), offset 10
-    EQUB LO(map_base), HI(map_base), 64, 2, 245, 5, 15, 4     ; Spring: skip every 4th mush (75%), offset 15
-    EQUB LO(map_base), HI(map_base), 64, 2, 241, 4, 0, 0      ; Summer: all mushrooms, no offset
+    EQUB LO(map_base), HI(map_base), 64, 2, 246, 1, 5, 2      ; Autumn: ~17 mush (50%), offset 5
+    EQUB LO(map_base), HI(map_base), 64, 2, 247, 7, 10, 3     ; Winter: ~22 mush (67%), offset 10
+    EQUB LO(map_base), HI(map_base), 64, 2, 245, 5, 15, 4     ; Spring: ~25 mush (75%), offset 15
+    EQUB LO(map_base), HI(map_base), 64, 2, 241, 4, 0, 0      ; Summer: 33 mush (100%), no offset
 
 ; ============================================================================
 ; Section: Map Data (single base map shared by all seasons)
@@ -1584,34 +1607,32 @@ NEXT
 ; All seasons use map_base with per-season col_offset and item_skip (mushrooms only)
 ; ============================================================================
 
-; --- Base map (53 items, 107 bytes) - shared by all seasons ---
-; 31 mushrooms, 20 fruits, 2 acorns
+; --- Base map (48 items, 97 bytes) - shared by all seasons ---
+; 33 mushrooms, 14 fruits, 1 acorn (at row 59, once per map cycle)
+; Rows 57-58 and 60-61 kept empty to give clear space around the acorn
 ; MAX 1 ITEM PER ROW to avoid frame overrun from VDU calls
-; Acorns at rows 9 and 35 (start + middle), bypass item_skip so always drawn
-; Acorn columns: col 11 and col 6 -> different position every season via offset
 ; Mushroom columns avoid {4,9,14,19} to prevent cap overflow after any offset
 .map_base
-    EQUB 0, &03, 1, &0F, 2, &28
+    EQUB 0, &03, 1, &0F, 2, &08
     EQUB 4, &06, 5, &10
-    EQUB 7, &0F, 8, &23, 9, &4B
-    EQUB 10, &07, 11, &32
+    EQUB 7, &0F, 8, &23
+    EQUB 9, &0B, 10, &07, 11, &32
     EQUB 12, &21, 13, &0D, 14, &0A
-    EQUB 17, &2D, 18, &02
-    EQUB 19, &11, 20, &27
+    EQUB 18, &02, 19, &11, 20, &07
     EQUB 22, &0B, 23, &23
     EQUB 24, &28, 25, &10
     EQUB 27, &01, 28, &2C, 29, &07
-    EQUB 30, &0F, 32, &03, 33, &31
-    EQUB 34, &2A, 35, &46, 36, &0D
-    EQUB 38, &05, 39, &32
+    EQUB 30, &0F, 32, &03
+    EQUB 33, &31, 34, &2A
+    EQUB 35, &06, 36, &0D
+    EQUB 38, &05, 39, &12
     EQUB 40, &22, 41, &0D
     EQUB 42, &08, 43, &10
     EQUB 44, &25, 45, &11
-    EQUB 47, &06, 48, &2F, 49, &21
-    EQUB 50, &0C, 52, &0A, 53, &33
-    EQUB 54, &27, 55, &05, 56, &30
-    EQUB 57, &0B, 58, &12
-    EQUB 60, &08, 61, &12
+    EQUB 47, &06, 48, &0F, 49, &21
+    EQUB 50, &0C, 52, &0A
+    EQUB 53, &33, 55, &05, 56, &30
+    EQUB 59, &4A
     EQUB 62, &22, 63, &10
     EQUB &FF
 
@@ -1631,18 +1652,26 @@ NEXT
     EQUB LO(str_autumn), LO(str_winter), LO(str_spring), LO(str_summer), LO(str_bonus)
 .season_name_hi
     EQUB HI(str_autumn), HI(str_winter), HI(str_spring), HI(str_summer), HI(str_bonus)
+.season_tab_col
+    EQUB 4, 4, 4, 4, 4   ; TAB start column for centred name display
+.acorn_target_col
+    EQUB 4, 11, 13, 11, 6 ; target columns spelling ACORN (A=4,C=11,O=13,R=11,N=6)
+.acorn_bit_table
+    EQUB 1, 2, 4, 8, 16   ; bit masks for acorn_word (one per season)
+.acorn_col_table
+    EQUB 10, 3, 16, 7     ; rotating acorn columns (spread across playfield)
 
 ; --- In-game strings (null-terminated) ---
 .str_autumn
-    EQUS "Autumn", 0
+    EQUS "Autumn Fall", 0
 .str_winter
-    EQUS "Winter", 0
+    EQUS "Winter Cold", 0
 .str_spring
-    EQUS "Spring", 0
+    EQUS "Spring Bloom", 0
 .str_summer
-    EQUS "Summer", 0
+    EQUS "Summer Rays", 0
 .str_bonus
-    EQUS "Bonus", 0
+    EQUS "Bonus Bunch", 0
 
 .end
 
