@@ -79,7 +79,7 @@ Sequence is fully deterministic — same positions every playthrough.
 
 ## Memory Layout
 - `&0060-&009F` - Zero page variables (position, score, game_result)
-- `&1900-&2356` - Assembly game engine code + data
+- `&1900-&22D9` - Assembly game engine code + data
 - `&2800-&2FFF` - BASIC program (PAGE=&2800, HIMEM=&3000)
 - `&3000-&7FFF` - MODE 2 screen memory
 

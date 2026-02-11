@@ -9,8 +9,6 @@
 - [x] Map compression: single base map with per-season col_offset and item_skip
 
 ### Improvements
-- [ ] Speed up after each season/stage
-- [ ] Pixel-perfect collision detection
 
 ## Known Issues
 
