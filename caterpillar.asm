@@ -1,5 +1,5 @@
 ; ============================================================================
-; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.0.8
+; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.0.9
 ; Converted from BBC BASIC by Paul Newell with some ssistance from Claude Code (c) 2026
 ; Game engine only - title/menu/scores handled by BASIC in MODE 7
 ; ============================================================================
@@ -24,7 +24,7 @@ prev_scr_lo  = &69     ; previous sprite screen address lo
 prev_scr_hi  = &6A     ; previous sprite screen address hi
 prev_scanline = &6B    ; previous sprite starting scanline (py AND 7)
 scroll_py     = &6C    ; hardware scroll offset in pixels (0-255, wraps)
-                       ; &6D free
+item_buf_wr    = &6D    ; item ring buffer write index (0-23)
 prev_scroll_py = &6E   ; scroll_py at last head draw (for change detection)
 acorn_word  = &9C      ; bitmask of collected ACORN letters (bits 0-4) - must be &90+ to survive BASIC
 
@@ -44,8 +44,7 @@ temp0       = &7A      ; general temp
 temp1       = &7B      ; general temp
 temp2       = &7C      ; general temp
 temp3       = &7D      ; general temp
-fruit_char  = &7E      ; current fruit character code
-fruit_col   = &7F      ; current fruit colour
+; &7E-&7F free (was mask_ptr for AND/OR blit, removed — black background)
 osword_blk  = &80      ; OSWORD parameter block (&80-&8F)
 scroll_div   = &90     ; frames between scrolls (4/3/2/1)
 scroll_count = &91     ; countdown to next scroll event
@@ -59,7 +58,7 @@ body_rdidx   = &98     ; ring buffer read index (oldest slot)
 copy_ptr_lo  = &99     ; pointer for body save buffer access (low)
 copy_ptr_hi  = &9A     ; pointer for body save buffer access (high)
 acorn_col_idx = &9B    ; rotating index into acorn_col_table (0-3)
-                       ; &6F free
+item_buf_rd    = &6F    ; item ring buffer read index (0-23)
 bonus_phase   = &9D    ; 0=normal play, 1=bonus round (empty+acorns after completion)
 transition_phase = &9E ; 0=normal play, 1=transitioning between seasons (empty map + name)
 game_result   = &9F    ; return code: 0=crash, 1=completed
@@ -136,9 +135,6 @@ GUARD &3000
     LDA #13
     JSR send_vdu_seq
 
-    ; Define characters 240-250
-    JSR define_characters
-
     ; Define sound envelope 1: gulp effect (descending pitch, quick decay)
     LDA #8
     LDX #LO(envelope_data)
@@ -175,6 +171,16 @@ GUARD &3000
     STA collision_key_prev
     LDA #1 : STA collision_on
     LDA #2 : STA scroll_div : STA scroll_count  ; initial scroll speed
+    ; Initialize item ring buffer (24 slots, all empty)
+    ; rd leads wr by 1 → 23-slot delay matches row 1 to caterpillar row 24
+    LDA #&FF : LDX #23
+.init_item_ring
+    STA item_col,X
+    DEX
+    BPL init_item_ring
+    LDA #0 : STA item_buf_wr
+    LDA #1 : STA item_buf_rd
+    JSR show_sprite_page ; diagnostic: display all sprites, wait for key
     JSR enter_transition ; show "Autumn", load empty transition map
 
 ; ============================================================================
@@ -551,10 +557,6 @@ GUARD &3000
     LDA season_config+3,X
     STA scroll_div
     STA scroll_count    ; prime the countdown
-    LDA season_config+4,X
-    STA fruit_char
-    LDA season_config+5,X
-    STA fruit_col
     LDA season_config+6,X
     STA col_offset
     LDA season_config+7,X
@@ -653,13 +655,18 @@ GUARD &3000
 ; Draw items from current map row, then scroll screen
 ; Map format: item bytes until &FF terminator
 ;   &00-&13: mushroom at column N (2 chars wide)
-;   &20-&33: fruit at column N-32
+;   &20-&33: item at column N-32
 ;   &40-&53: acorn at column N-64
 ;   &FF: end of row
 .draw_map_row
     ; VDU 4 - text cursor mode (needed for row clear VDU 28/12)
     LDA #4
     JSR OSWRCH
+
+    ; Default: no item this row (overwritten if mushroom/apple/acorn is drawn)
+    LDX item_buf_wr
+    LDA #&FF
+    STA item_col,X
 
     ; During transition, skip item parsing (no map data to read)
     LDA transition_phase
@@ -699,7 +706,7 @@ GUARD &3000
     CMP #&40
     BCS dmr_no_offset
 
-    ; Fruits (&20+) bypass the skip check - always drawn
+    ; Apples (&20+) bypass the skip check - always drawn
     CMP #&20
     BCS dmr_apply_offset
 
@@ -735,49 +742,69 @@ GUARD &3000
     LDA temp2
     ; Determine item type
     CMP #&40
-    BCS dmr_acorn       ; >= &40: acorn
+    BCC dmr_not_acorn   ; < &40: not acorn
+    JMP dmr_acorn
+.dmr_not_acorn
     CMP #&20
-    BCS dmr_fruit       ; >= &20: fruit
+    BCS dmr_item       ; >= &20: apple
     ; Fall through: mushroom (&00-&13)
 
-    ; --- Mushroom ---
+    ; --- Mushroom (direct screen write: cap_left + cap_right at row 1, stem at row 2) ---
     STA temp0           ; column
-    ; COLOUR 2 (green)
-    LDA #2
-    JSR do_colour
-    ; TAB(col,1) CHR$242 CHR$243
-    LDA temp0
+    ; Cap left at (col, row 1)
     LDX #1
-    JSR do_tab
-    LDA #242
-    JSR OSWRCH
-    LDA #243
-    JSR OSWRCH
-    ; COLOUR 3 (yellow)
-    LDA #3
-    JSR do_colour
-    ; TAB(col,2) CHR$244
+    JSR calc_item_addr
+    LDA #LO(spr_cap_left) : STA copy_ptr_lo
+    LDA #HI(spr_cap_left) : STA copy_ptr_hi
+    JSR draw_item
+    ; Cap right at (col+1, row 1)
+    LDA temp0
+    CLC : ADC #1
+    LDX #1
+    JSR calc_item_addr
+    LDA #LO(spr_cap_right) : STA copy_ptr_lo
+    LDA #HI(spr_cap_right) : STA copy_ptr_hi
+    JSR draw_item
+    ; Stem at (col, row 2)
     LDA temp0
     LDX #2
-    JSR do_tab
-    LDA #244
-    JSR OSWRCH
+    JSR calc_item_addr
+    LDA #LO(spr_stem) : STA copy_ptr_lo
+    LDA #HI(spr_stem) : STA copy_ptr_hi
+    JSR draw_item
+    ; Register mushroom cap in ring buffer (temp0 = left column, preserved by draw_item)
+    LDX item_buf_wr
+    LDA temp0 : STA item_col,X
+    LDA #0 : STA item_type,X   ; type 0 = mushroom
+    ; Stem at row 2 arrives 1 scroll before cap at row 1. Register stem
+    ; collision in previous ring buffer slot (if empty) so it's checked
+    ; when the stem reaches caterpillar row, not just the cap.
+    DEX : BPL stem_no_wrap : LDX #23
+.stem_no_wrap
+    LDA item_col,X
+    CMP #&FF                    ; previous slot unused?
+    BNE stem_skip
+    LDA temp0 : STA item_col,X ; same column as cap left
+    LDA #3 : STA item_type,X   ; type 3 = stem (1-col wide crash check)
+.stem_skip
     JMP dmr_next_item
 
-.dmr_fruit
-    ; Fruit: column = item - &20
+.dmr_item
+    ; Item: column = byte - &20 (direct screen write, sprite varies by season)
     SEC
     SBC #&20
     STA temp0           ; column
-    ; COLOUR fruit_col
-    LDA fruit_col
-    JSR do_colour
-    ; TAB(col,1) CHR$ fruit_char
+    ; Register item in ring buffer
+    LDX item_buf_wr
+    STA item_col,X      ; A still has column
+    LDA #1 : STA item_type,X   ; type 1 = item
     LDA temp0
     LDX #1
-    JSR do_tab
-    LDA fruit_char
-    JSR OSWRCH
+    JSR calc_item_addr
+    LDX season
+    LDA item_spr_lo,X : STA copy_ptr_lo
+    LDA item_spr_hi,X : STA copy_ptr_hi
+    JSR draw_item
     JMP dmr_next_item
 
 .dmr_acorn
@@ -791,24 +818,24 @@ GUARD &3000
     LDX #0
 .dmr_acorn_no_wrap
     STX acorn_col_idx
-    ; COLOUR 11 (bright yellow)
-    LDA #11
-    JSR do_colour
-    ; TAB(col,1) CHR$248
+    ; Register acorn in ring buffer
+    LDX item_buf_wr
+    LDA temp0 : STA item_col,X
+    LDA #2 : STA item_type,X   ; type 2 = acorn
+    ; Acorn top at (col, row 1) — direct screen write
     LDA temp0
     LDX #1
-    JSR do_tab
-    LDA #248
-    JSR OSWRCH
-    ; COLOUR 10 (bright green)
-    LDA #10
-    JSR do_colour
-    ; TAB(col,2) CHR$249
+    JSR calc_item_addr
+    LDA #LO(spr_acorn_top) : STA copy_ptr_lo
+    LDA #HI(spr_acorn_top) : STA copy_ptr_hi
+    JSR draw_item
+    ; Acorn bottom at (col, row 2)
     LDA temp0
     LDX #2
-    JSR do_tab
-    LDA #249
-    JSR OSWRCH
+    JSR calc_item_addr
+    LDA #LO(spr_acorn_bottom) : STA copy_ptr_lo
+    LDA #HI(spr_acorn_bottom) : STA copy_ptr_hi
+    JSR draw_item
 
 .dmr_next_item
     LDY temp3           ; restore map index
@@ -845,15 +872,32 @@ GUARD &3000
     ADC #8
     STA scroll_py
 
+    ; Advance item ring buffer pointers (both move 1 slot per scroll)
+    LDX item_buf_wr
+    INX
+    CPX #24
+    BCC ibw_no_wrap
+    LDX #0
+.ibw_no_wrap
+    STX item_buf_wr
+    LDX item_buf_rd
+    INX
+    CPX #24
+    BCC ibr_no_wrap
+    LDX #0
+.ibr_no_wrap
+    STX item_buf_rd
+
     ; VDU 5 - graphics cursor mode
     LDA #5
     JMP OSWRCH
 
 ; ============================================================================
-; Section: PROCcheckhit - direct screen memory collision detection
-; Scans ALL 40 save_buffer bytes (5 byte-cols x 8 rows) for any non-black
-; left pixel. Detects items at any position under the sprite — left edge,
-; centre, or right edge — so collision works when approaching from any side.
+; Section: PROCcheckhit - ring buffer position-based collision detection
+; Checks the item at the current read index against caterpillar's text column
+; range. Items are registered during draw_map_row and arrive at caterpillar
+; row 24 exactly 23 scrolls later (matching the ring buffer delay).
+; Type dispatch: 0=mushroom→crash, 1=item→score by season, 2=acorn→bonus, 3=stem→crash.
 ; Called from proc_caterpillar after save_background, before draw_sprite.
 ; ============================================================================
 .proc_checkhit
@@ -862,72 +906,88 @@ GUARD &3000
     BNE pch_active
     RTS
 .pch_active
-    ; Scan save_buffer for first non-black left pixel (early exit)
-    LDX #31
-.pch_scan
-    LDA save_buffer,X
-    AND #&AA            ; isolate left pixel bits
-    BNE pch_has_colour  ; found a coloured pixel
-    DEX
-    BPL pch_scan
-    RTS                 ; all black = no collision
-.pch_has_colour
-    ; A = left-pixel byte; compare directly against MODE 2 colour encodings
-    ; Crash colours (mushroom cap/stem)
-    CMP #&08            ; colour 2 (green = mushroom cap)
-    BEQ is_crash
-    CMP #&0A            ; colour 3 (yellow = mushroom stem)
-    BNE not_crash
-.is_crash
-    JMP proc_crash
-.not_crash
-    ; Eat the item: zero save_buffer, clear from screen via VDU, then score
-    PHA                 ; save left-pixel byte
-    ; Zero save_buffer so future background restore writes black
+    ; Read item at current ring buffer position
+    LDX item_buf_rd
+    LDA item_col,X
+    CMP #&FF
+    BNE pch_has_item
+    RTS                     ; &FF = no item at this row
+.pch_has_item
+    STA temp0               ; item column (left edge)
+    LDA item_type,X
+    STA temp1               ; item type (0=mushroom, 1=item, 2=acorn, 3=stem)
+    ; Calculate caterpillar text column range
+    LDA cat_px_x
+    LSR A : LSR A : LSR A   ; cat_left_col = px / 8
+    STA temp2
+    LDA cat_px_x
+    CLC : ADC #7
+    LSR A : LSR A : LSR A   ; cat_right_col = (px + 7) / 8
+    STA temp3
+    ; Determine item's right edge (mushroom = 2 cols, others = 1 col)
+    LDA temp1
+    BNE pch_single_col      ; type 1 or 2 = 1 column wide
+    ; Mushroom: occupies [col, col+1]
+    LDA temp0
+    CLC : ADC #1
+    JMP pch_check_overlap
+.pch_single_col
+    LDA temp0               ; right_edge = col (same as left)
+.pch_check_overlap
+    ; A = item right edge. Check range overlap:
+    ; hit if right_edge >= cat_left AND cat_right >= item_left
+    CMP temp2               ; right_edge vs cat_left_col
+    BCC pch_miss            ; right_edge < cat_left → miss
+    LDA temp3               ; cat_right_col
+    CMP temp0               ; vs item_left_col
+    BCC pch_miss            ; cat_right < item_left → miss
+    ; === HIT! ===
+    ; Clear ring buffer slot (prevent re-triggering)
+    LDX item_buf_rd
+    LDA #&FF : STA item_col,X
+    ; Dispatch mushroom/stem early — they stay visible (no erase) for debug
+    LDA temp1
+    BEQ pch_mushroom             ; type 0 = cap → crash (skip erase)
+    CMP #3
+    BEQ pch_mushroom             ; type 3 = stem → crash (skip erase)
+    ; Food items: erase from screen on contact
+    ; Zero save_buffer so background restore writes black (erases item)
+    PHA                          ; save item type
     LDA #0 : LDX #31
-.clear_sb
+.pch_clear_sb
     STA save_buffer,X
     DEX
-    BPL clear_sb
-    ; Clear item from screen using VDU (MOS handles CRTC scroll)
-    ; Print 2 spaces covering sprite's full width (16px = 2 text cols)
-    LDA #4 : JSR OSWRCH          ; VDU 4 - text cursor mode
-    LDA #0 : JSR do_colour       ; text colour 0 (black)
+    BPL pch_clear_sb
+    ; Clear item from screen: 2 spaces at caterpillar row
+    LDA #4 : JSR OSWRCH          ; VDU 4
+    LDA #0 : JSR do_colour       ; black text
     LDA cat_px_x
-    LSR A : LSR A : LSR A        ; A = text column of sprite left edge
-    LDX #24                      ; text row (caterpillar visual row)
-    JSR do_tab                   ; VDU 31, col, 25
-    LDA #32 : JSR OSWRCH         ; space 1 (left half)
-    LDA #32 : JSR OSWRCH         ; space 2 (right half)
-    LDA #5 : JSR OSWRCH          ; VDU 5 - back to graphics cursor
-    ; Dispatch score by left-pixel byte (MODE 2 colour encoding)
-    PLA
-    CMP #&02            ; colour 1 (red = leaf, 5 pts)
-    BNE not_col1
-    LDX #LO(sound_hit1) : LDY #HI(sound_hit1) : LDA #5
+    LSR A : LSR A : LSR A
+    LDX #24
+    JSR do_tab
+    LDA #32 : JSR OSWRCH         ; space 1
+    LDA #32 : JSR OSWRCH         ; space 2
+    LDA #5 : JSR OSWRCH          ; VDU 5
+    PLA                          ; restore item type
+    CMP #2
+    BEQ pch_acorn                ; type 2 = acorn → bonus scoring
+    ; Type 1 = item: score and sound vary by season
+    LDX season
+    LDA item_points,X          ; A = points for this season
+    PHA                          ; save points on stack
+    LDA item_sound_hi,X
+    TAY                          ; Y = sound block hi
+    LDA item_sound_lo,X
+    TAX                          ; X = sound block lo
+    PLA                          ; A = points
     JMP add_score_and_sound
-.not_col1
-    CMP #&2A            ; colour 7 (white = twig, 10 pts)
-    BNE not_col7
-    LDX #LO(sound_hit2) : LDY #HI(sound_hit2) : LDA #10
-    JMP add_score_and_sound
-.not_col7
-    CMP #&22            ; colour 5 (magenta = flower, 15 pts)
-    BNE not_col5
-    LDX #LO(sound_hit3) : LDY #HI(sound_hit3) : LDA #15
-    JMP add_score_and_sound
-.not_col5
-    CMP #&20            ; colour 4 (blue = fruit, 20 pts)
-    BNE not_col4
-    LDX #LO(sound_hit4) : LDY #HI(sound_hit4) : LDA #20
-    JMP add_score_and_sound
-.not_col4
-    CMP #&8A            ; colour 11 (bright yellow = acorn)
-    BNE no_hit
+.pch_mushroom
+    JMP proc_crash
+.pch_acorn
     LDA acorn_score : CLC : ADC #10 : STA acorn_score
     LDX #LO(sound_hit5) : LDY #HI(sound_hit5)
     JMP add_score_and_sound
-.no_hit
+.pch_miss
     RTS
 
 ; Common score addition + sound routine
@@ -987,6 +1047,9 @@ GUARD &3000
     LDA #15
     LDX #0
     JSR OSBYTE
+
+    ; Pause so player can see where collision occurred
+    JSR OSRDCH               ; wait for any key press
 
     ; IF S% > T% THEN T% = S% (update hiscore)
     ; Compare score with high score
@@ -1127,36 +1190,87 @@ GUARD &3000
 .as_done
     RTS
 
-
-; ============================================================================
-; Section: Character Definitions
-; ============================================================================
-.define_characters
-    ; Define characters 240-249 using VDU 23 sequences
-    ; Each character: VDU 23, char_num, b0, b1, b2, b3, b4, b5, b6, b7
-    LDX #0              ; index into char_data
-    LDA #240            ; starting character number
-    STA temp0
-.defchar_loop
-    LDA #23
-    JSR OSWRCH
-    LDA temp0           ; character number
-    JSR OSWRCH
-    ; Send 8 bytes of bitmap data
-    LDY #0
-.defchar_byte
-    LDA char_data,X
-    JSR OSWRCH
-    INX
-    INY
-    CPY #8
-    BNE defchar_byte
-    ; Next character
-    INC temp0
-    LDA temp0
-    CMP #250            ; done after char 249
-    BNE defchar_loop
+; --- calc_item_addr ---
+; Calculate screen address for a text cell, accounting for hardware scroll.
+; Items are always char-aligned (scroll_py is multiples of 8), so scanline=0.
+; Entry: A = text column (0-19), X = text row (1-2)
+; Result: scr_addr_lo/hi = screen address of top-left byte
+; Clobbers: A, X, Y
+.calc_item_addr
+    PHA                 ; save text_col
+    ; Physical char row = ((text_row * 8) - scroll_py) / 8
+    TXA
+    ASL A : ASL A : ASL A  ; A = text_row * 8
+    SEC
+    SBC scroll_py       ; physical pixel Y (wraps via byte truncation)
+    LSR A : LSR A : LSR A  ; physical char row (0-31)
+    TAX
+    LDA row_table_lo,X
+    STA scr_addr_lo
+    LDA row_table_hi,X
+    STA scr_addr_hi
+    ; Add text_col * 32 (each text column = 4 byte-cols * 8 bytes)
+    PLA                 ; restore text_col (0-19)
+    TAX                 ; save copy in X
+    ; High byte: text_col >> 3 (0, 1, or 2)
+    LSR A : LSR A : LSR A
+    CLC
+    ADC scr_addr_hi
+    STA scr_addr_hi
+    ; Low byte: (text_col AND 7) << 5
+    TXA
+    AND #7
+    ASL A : ASL A : ASL A : ASL A : ASL A
+    CLC
+    ADC scr_addr_lo
+    STA scr_addr_lo
+    BCC cia_no_carry
+    INC scr_addr_hi
+.cia_no_carry
     RTS
+
+; --- draw_item ---
+; Write 32 bytes of pre-encoded sprite data to screen (4 byte-cols x 8 scanlines).
+; Items are char-aligned so scanline advance is always +1 (no row boundary cross).
+; Entry: copy_ptr_lo/hi = sprite data address, scr_addr_lo/hi = screen address
+; Clobbers: A, Y, temp1 (preserves temp0)
+.draw_item
+    LDA #8
+    STA temp1           ; row counter
+.di_row_loop
+    ; Write 4 bytes at screen offsets 0, 8, 16, 24
+    LDY #0
+    LDA (copy_ptr_lo),Y
+    STA (scr_addr_lo),Y
+    INY
+    LDA (copy_ptr_lo),Y
+    LDY #8
+    STA (scr_addr_lo),Y
+    LDY #2
+    LDA (copy_ptr_lo),Y
+    LDY #16
+    STA (scr_addr_lo),Y
+    LDY #3
+    LDA (copy_ptr_lo),Y
+    LDY #24
+    STA (scr_addr_lo),Y
+    ; Advance copy_ptr by 4 (next scanline of sprite data)
+    CLC
+    LDA copy_ptr_lo
+    ADC #4
+    STA copy_ptr_lo
+    BCC di_no_ptr_carry
+    INC copy_ptr_hi
+.di_no_ptr_carry
+    ; Advance scanline (+1, always within same char row)
+    INC scr_addr_lo
+    BNE di_no_scr_carry
+    INC scr_addr_hi
+.di_no_scr_carry
+    DEC temp1
+    BNE di_row_loop
+    RTS
+
 
 ; ============================================================================
 ; Section: Screen Address Routines
@@ -1320,19 +1434,19 @@ GUARD &3000
     STA temp1           ; row counter
 .de_row_loop
     LDY #0
-    LDA sprite_data_even,X
+    LDA spr_caterpillar,X
     STA (scr_addr_lo),Y
     INX
     LDY #8
-    LDA sprite_data_even,X
+    LDA spr_caterpillar,X
     STA (scr_addr_lo),Y
     INX
     LDY #16
-    LDA sprite_data_even,X
+    LDA spr_caterpillar,X
     STA (scr_addr_lo),Y
     INX
     LDY #24
-    LDA sprite_data_even,X
+    LDA spr_caterpillar,X
     STA (scr_addr_lo),Y
     INX
     JSR advance_scanline
@@ -1389,6 +1503,14 @@ GUARD &3000
 .body_save_4
     SKIP 32
 
+; --- Item ring buffer data (24 entries each) ---
+; Tracks items from row 1 draw position to caterpillar row 24.
+; Each slot holds the text column (&FF = empty) and type (0/1/2).
+.item_col
+    SKIP 24
+.item_type
+    SKIP 24
+
 ; Lookup tables: address of each body save buffer (lo/hi)
 .body_buf_addr_lo
     EQUB LO(body_save_0)
@@ -1403,27 +1525,15 @@ GUARD &3000
     EQUB HI(body_save_3)
     EQUB HI(body_save_4)
 
-; --- Pre-encoded caterpillar sprite for MODE 2, colour 6 (cyan) ---
-; Even-aligned: 8 rows x 4 bytes = 32 bytes (sprite starts at left pixel of byte)
-; Derived from char 240 bitmap: 153, 90, 24, 219, 90, 219, 90, 219
-; Colour 6 left pixel = &28, right pixel = &14, both = &3C, neither = &00
-.sprite_data_even
-    ; Row 0: 10011001 → (L,_),(_,R),(L,_),(_,R)
-    EQUB &28, &14, &28, &14
-    ; Row 1: 01011010 → (_,R),(_,R),(L,_),(L,_)
-    EQUB &14, &14, &28, &28
-    ; Row 2: 00011000 → (_,_),(_,R),(L,_),(_,_)
-    EQUB &00, &14, &28, &00
-    ; Row 3: 11011011 → (L,R),(_,R),(L,_),(L,R)
-    EQUB &3C, &14, &28, &3C
-    ; Row 4: 01011010
-    EQUB &14, &14, &28, &28
-    ; Row 5: 11011011
-    EQUB &3C, &14, &28, &3C
-    ; Row 6: 01011010
-    EQUB &14, &14, &28, &28
-    ; Row 7: 11011011
-    EQUB &3C, &14, &28, &3C
+.spr_caterpillar
+    EQUB &2A, &01, &02, &15
+    EQUB &04, &01, &02, &08
+    EQUB &00, &01, &02, &00
+    EQUB &0F, &01, &02, &0F
+    EQUB &04, &01, &02, &08
+    EQUB &0F, &01, &02, &0F
+    EQUB &04, &01, &02, &08
+    EQUB &0F, &01, &02, &0F
 
 ; --- MODE 2 row address lookup table ---
 ; row_table[n] = &3000 + n * 640
@@ -1438,65 +1548,133 @@ FOR i, 0, 31
     EQUB HI(&3000 + i*640)
 NEXT
 
-; --- MODE 2 colour encoding tables ---
-; In MODE 2, each byte encodes 2 pixels (left and right).
-; Each pixel has 4 bits of colour (16 colours).
-; Bit layout: L3 R3 L2 R2 L1 R1 L0 R0
-; (L = left pixel bits, R = right pixel bits)
-;
-; Left pixel colour table: colour value -> byte with just left pixel set
-; Right pixel colour table: colour value -> byte with just right pixel set
-; To make a byte with both pixels: left_table[left_col] OR right_table[right_col]
+.spr_cap_left
+    EQUB &00,&00,&00,&00
+    EQUB &00,&00,&00,&0C
+    EQUB &00,&00,&0C,&0C
+    EQUB &00,&0C,&0C,&0C
+    EQUB &00,&0C,&1C,&0C
+    EQUB &04,&0C,&0C,&0C
+    EQUB &0C,&1C,&0C,&0C
+    EQUB &0C,&0C,&0C,&0C
 
-; colour_left table eliminated — proc_checkhit compares left-pixel bytes directly
-; MODE 2 left-pixel encoding: colour bits b3,b2,b1,b0 → byte bits 7,5,3,1
-; Used values: &02(col1) &08(col2) &0A(col3) &20(col4) &22(col5) &2A(col7) &8A(col11)
+.spr_cap_right
+    EQUB &00,&00,&00,&00
+    EQUB &00,&00,&00,&00
+    EQUB &0C,&00,&00,&00
+    EQUB &0C,&08,&00,&00
+    EQUB &0C,&0C,&00,&00
+    EQUB &1C,&0C,&00,&00
+    EQUB &0C,&0C,&08,&00
+    EQUB &0C,&0C,&08,&00
 
-; --- Character bitmap data (chars 240-249) ---
-; 10 characters x 8 bytes = 80 bytes
-.char_data
-    ; CHR$240 - caterpillar body
-    EQUB 153, 90, 24, 219, 90, 219, 90, 219
-    ; CHR$241 - fruit
-    EQUB 6, 24, 126, 223, 191, 191, 223, 126
-    ; CHR$242 - mushroom cap left
-    EQUB 0, 0, 0, 15, 63, 127, 255, 255
-    ; CHR$243 - mushroom cap right
-    EQUB 0, 0, 0, 0, 224, 240, 248, 248
-    ; CHR$244 - mushroom stem
-    EQUB 7, 7, 7, 7, 7, 0, 0, 0
-    ; CHR$245 - leaf/food
-    EQUB 8, 28, 28, 107, 127, 107, 8, 28
-    ; CHR$246 - leaf
-    EQUB 128, 112, 248, 252, 254, 126, 31, 7
-    ; CHR$247 - twig
-    EQUB 133, 201, 113, 49, 119, 30, 4, 4
-    ; CHR$248 - acorn top
-    EQUB 0, 24, 44, 94, 94, 191, 191, 255
-    ; CHR$249 - acorn bottom
-    EQUB 0, 255, 126, 60, 7, 0, 0, 0
+.spr_stem
+    EQUB &00,&00,&05,&3F
+    EQUB &00,&00,&05,&3F
+    EQUB &00,&00,&05,&3F
+    EQUB &00,&00,&05,&3F
+    EQUB &00,&00,&05,&3F
+    EQUB &00,&00,&05,&3F
+    EQUB &00,&00,&05,&3F
+    EQUB &00,&00,&00,$00
+
+.spr_leaf
+    EQUB &02,&00,&00,&00
+    EQUB &01,&07,&00,&00
+    EQUB &13,&27,&02,&00
+    EQUB &13,&33,&1F,&00
+    EQUB &13,&33,&1B,&02
+    EQUB &13,&13,&27,&02
+    EQUB &01,&13,&13,&23
+    EQUB &00,&13,&13,&13
+
+.spr_snow
+    EQUB &00,&55,&00,&00
+    EQUB &00,&2A,&2A,&00
+    EQUB &15,&15,&15,&00
+    EQUB &AA,&3F,&2A,&AA
+    EQUB &15,&15,&15,&00
+    EQUB &00,&2A,&2A,&00
+    EQUB &00,&55,&00,&00
+    EQUB &00,&00,&00,&00
+
+.spr_flower
+    EQUB &00,&33,&33,&00
+    EQUB &11,&37,&3B,&22
+    EQUB &33,&3B,&37,&33
+    EQUB &33,&37,&3B,&33
+    EQUB &11,&33,&33,&22
+    EQUB &11,&33,&33,&22
+    EQUB &00,&04,&08,&00
+    EQUB &00,&04,&08,&00
+
+.spr_acorn_top
+    EQUB &00,&C3,&C3,&00
+    EQUB &41,&CF,&DF,&82
+    EQUB &C7,&CF,&EF,&CF
+    EQUB &C7,&CF,&CF,&CF
+    EQUB &C7,&CF,&CF,&CF
+    EQUB &C7,&CF,&CF,&CF
+    EQUB &CF,&CF,&CF,&CF
+    EQUB &CF,&CF,&CF,&CF
+
+.spr_acorn_bottom
+    EQUB &00,&00,&00,&00
+    EQUB &0C,&0C,&0C,&0C
+    EQUB &0C,&0C,&0C,&0C
+    EQUB &04,&0C,&0C,&08
+    EQUB &00,&0C,&0C,&00
+    EQUB &00,&04,&08,&00
+    EQUB &00,&04,&08,&00
+    EQUB &04,&0C,&00,&00
+
+.spr_apple
+    EQUB &00,&0C,&00,&00
+    EQUB &01,&0C,&02,&00
+    EQUB &03,&2B,&03,&00
+    EQUB &03,&03,&03,&00
+    EQUB &03,&03,&03,&00
+    EQUB &03,&03,&03,&00
+    EQUB &01,&03,&02,&00
+    EQUB &00,&00,&00,&00
+
+; --- Item sprite lookup table (indexed by season 0-3) ---
+.item_spr_lo
+    EQUB LO(spr_leaf), LO(spr_snow), LO(spr_flower), LO(spr_apple)
+.item_spr_hi
+    EQUB HI(spr_leaf), HI(spr_snow), HI(spr_flower), HI(spr_apple)
+
+
+; --- Item scoring lookup tables (indexed by season 0-3) ---
+; Points awarded and sound block played when eating an item
+.item_points
+    EQUB 5, 10, 15, 20       ; autumn=5, winter=10, spring=15, summer=20
+.item_sound_lo
+    EQUB LO(sound_hit1), LO(sound_hit2), LO(sound_hit3), LO(sound_hit4)
+.item_sound_hi
+    EQUB HI(sound_hit1), HI(sound_hit2), HI(sound_hit3), HI(sound_hit4)
 
 ; --- Sound data blocks (8 bytes each) ---
 ; Format: channel(2), amplitude(2), pitch(2), duration(2)
 
 ; Eat sounds use envelope 1 (gulp: descending pitch, quick decay)
-; Hit colour 1 (leaves, 5pts): SOUND 1,1,60,4
+; Autumn leaf (5pts): SOUND 1,1,60,4
 .sound_hit1
     EQUW 1, 1, 60, 4
 
-; Hit colour 7 (twigs, 10pts): SOUND 1,1,80,4
+; Winter snow (10pts): SOUND 1,1,80,4
 .sound_hit2
     EQUW 1, 1, 80, 4
 
-; Hit colour 5 (flowers, 15pts): SOUND 1,1,100,4
+; Spring flower (15pts): SOUND 1,1,100,4
 .sound_hit3
     EQUW 1, 1, 100, 4
 
-; Hit colour 4 (fruits, 20pts): SOUND 1,1,120,4
+; Summer apple (20pts): SOUND 1,1,120,4
 .sound_hit4
     EQUW 1, 1, 120, 4
 
-; Hit colour 11 (acorns, 50pts): SOUND 1,1,30,6 (envelope 1: deep gulp)
+; Acorn (incrementing): SOUND 1,1,30,6 (envelope 1: deep gulp)
 .sound_hit5
     EQUW 1, 1, 30, 6
 
@@ -1550,7 +1728,7 @@ NEXT
     EQUB 0         ; decay target
 
 ; --- Season configuration table (8 bytes per season) ---
-; Format: map_lo, map_hi, map_rows, scroll_div, fruit_char, fruit_colour, col_offset, item_skip
+; Format: map_lo, map_hi, map_rows, scroll_div, item_char, item_colour, col_offset, item_skip
 ; All seasons share map_base. col_offset shifts columns, item_skip skips every Nth mushroom (0=none).
 .season_config
     EQUB LO(map_base), HI(map_base), 64, 2, 246, 1, 5, 2      ; Autumn: ~17 mush (50%), offset 5
@@ -1563,14 +1741,14 @@ NEXT
 ; Pair format: row_number, type_col, ... &FF sentinel
 ; Item encoding (type_col byte):
 ;   &00-&13: mushroom at column 0-19
-;   &20-&33: season fruit at column 0-19
+;   &20-&33: season item at column 0-19
 ;   &40-&53: acorn at column 0-19
 ; Empty rows need no data (parser skips rows with no matching pairs)
 ; All seasons use map_base with per-season col_offset and item_skip (mushrooms only)
 ; ============================================================================
 
 ; --- Base map (48 items, 97 bytes) - shared by all seasons ---
-; 33 mushrooms, 14 fruits, 1 acorn (at row 59, once per map cycle)
+; 33 mushrooms, 14 apples, 1 acorn (at row 59, once per map cycle)
 ; Rows 57-58 and 60-61 kept empty to give clear space around the acorn
 ; MAX 1 ITEM PER ROW to avoid frame overrun from VDU calls
 ; Mushroom columns avoid {4,9,14,19} to prevent cap overflow after any offset
@@ -1632,6 +1810,87 @@ NEXT
     EQUS "Summer Rays", 0
 .str_bonus
     EQUS "Bonus Bunch", 0
+
+; ============================================================================
+; Section: Sprite Preview Page (diagnostic — remove when no longer needed)
+; Displays all game sprites on screen for visual inspection.
+; Called once from game_init; safe to delete this block + the JSR call.
+; ============================================================================
+.show_sprite_page
+    ; Print text labels
+    LDA #4 : JSR OSWRCH          ; VDU 4 (text cursor mode)
+    LDA #7 : JSR do_colour       ; white text
+    ; Title
+    LDA #3 : LDX #1 : JSR do_tab
+    LDX #LO(str_ssp_title) : LDY #HI(str_ssp_title)
+    JSR print_string
+    ; Top row labels
+    LDA #0 : LDX #3 : JSR do_tab
+    LDX #LO(str_ssp_row1) : LDY #HI(str_ssp_row1)
+    JSR print_string
+    ; Bottom row labels
+    LDA #0 : LDX #8 : JSR do_tab
+    LDX #LO(str_ssp_row2) : LDY #HI(str_ssp_row2)
+    JSR print_string
+    ; Instruction
+    LDA #3 : LDX #14 : JSR do_tab
+    LDX #LO(str_ssp_key) : LDY #HI(str_ssp_key)
+    JSR print_string
+
+    ; Draw sprites from table (direct screen writes, independent of VDU mode)
+    LDY #0
+.ssp_loop
+    LDA ssp_table,Y         ; text column (or &FF sentinel)
+    CMP #&FF
+    BEQ ssp_wait
+    PHA                      ; save column
+    INY
+    LDA ssp_table,Y         ; text row
+    TAX
+    INY
+    STY temp3                ; save table index
+    PLA                      ; A = column
+    JSR calc_item_addr       ; scr_addr = screen address for (col, row)
+    LDY temp3
+    LDA ssp_table,Y         ; sprite data lo
+    STA copy_ptr_lo
+    INY
+    LDA ssp_table,Y         ; sprite data hi
+    STA copy_ptr_hi
+    INY
+    STY temp3
+    JSR draw_item            ; draw 4×8 sprite at scr_addr
+    LDY temp3
+    JMP ssp_loop
+.ssp_wait
+    JSR OSRDCH               ; wait for any key press
+    LDA #12 : JSR OSWRCH     ; CLS - clear screen for game
+    LDA #5 : JMP OSWRCH      ; VDU 5 (graphics mode) + tail-call return
+
+; --- Sprite preview layout table: col, row, sprite_lo, sprite_hi ---
+.ssp_table
+    ; Top row (row 4-5): mushroom assembled, then seasonal apples + apple
+    EQUB  1, 4, LO(spr_cap_left),  HI(spr_cap_left)
+    EQUB  2, 4, LO(spr_cap_right), HI(spr_cap_right)
+    EQUB  1, 5, LO(spr_stem),      HI(spr_stem)
+    EQUB  5, 4, LO(spr_leaf),      HI(spr_leaf)
+    EQUB  8, 4, LO(spr_snow),      HI(spr_snow)
+    EQUB 11, 4, LO(spr_flower),    HI(spr_flower)
+    EQUB 15, 4, LO(spr_apple),     HI(spr_apple)
+    ; Bottom row (row 9-10): acorn stacked, caterpillar head
+    EQUB  3, 9, LO(spr_acorn_top),    HI(spr_acorn_top)
+    EQUB  3,10, LO(spr_acorn_bottom), HI(spr_acorn_bottom)
+    EQUB  8, 9, LO(spr_caterpillar), HI(spr_caterpillar)
+    EQUB &FF    ; sentinel
+
+.str_ssp_title
+    EQUS "SPRITE PREVIEW", 0
+.str_ssp_row1
+    EQUS " MU  LF TW FL  AP", 0
+.str_ssp_row2
+    EQUS "   AC   HD", 0
+.str_ssp_key
+    EQUS "PRESS ANY KEY", 0
 
 .end
 
