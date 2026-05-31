@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Caterpillar - BBC Micro (1983)</title>
+  <title>Caterpillar - BBC Micro (6502 assembly rewrite)</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -67,7 +67,7 @@
 </head>
 <body>
   <h1>Caterpillar</h1>
-  <p class="subtitle">BBC Micro &middot; Paul Newell &middot; 1983</p>
+  <p class="subtitle">BBC Micro &middot; Paul Newell &middot; 1983, rewritten in 6502 assembly 2026</p>
 
   <div class="emulator-container">
     <iframe id="emulator" allow="autoplay" loading="eager"></iframe>
@@ -76,7 +76,7 @@
   <div class="instructions">
     <p>Click the emulator to give it focus, then press any key to start.</p>
     <p>Use <kbd>Z</kbd> to move left and <kbd>M</kbd> to move right.</p>
-    <p>Eat leaves, twigs, flowers, apples and acorns for points. Avoid the mushrooms!</p>
+    <p>Eat the seasonal fruit and acorns for points. Avoid the mushrooms!</p>
   </div>
 
   <div class="footer">
@@ -106,7 +106,8 @@
         });
     } else {
       // GitHub Pages (or any HTTPS host): the .ssd sits alongside this page.
-      bootDisc(encodeURIComponent(new URL(DISC, loc.href).href));
+      // jsbeeb wants the disc URL raw (unencoded), as in its own examples.
+      bootDisc(new URL(DISC, loc.href).href);
     }
   </script>
 </body>
