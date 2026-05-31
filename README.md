@@ -4,12 +4,17 @@ A type-in BASIC game from 1983, rewritten in native 6502 assembly in 2026 by the
 
 The original was published as a type-in listing in **Computer & Video Games** magazine (issue 23, 1983), This repository is the **2026 rewrite** for the BBC Micro Model B: same game, rebuilt from scratch with multi-colour sprites and a vsync-locked 50Hz engine.
 
+<!-- Scan: magazine cover -->
 <p align="center">
-  <img src="assets/CVG-cover.jpg" alt="C&amp;VG issue 23 cover" width="280">
-  &nbsp;&nbsp;
-  <img src="assets/CVG-program.png" alt="Caterpillar listing as printed in C&amp;VG" width="280">
+  <img src="assets/CVG-cover.jpg" alt="C&amp;VG issue 23 cover" width="320">
 </p>
-<p align="center"><em>Left: the magazine cover. Right: the printed listing.</em> Full-resolution scans live in <a href="./assets/"><code>assets/</code></a>.</p>
+<p align="center"><em>Computer &amp; Video Games, issue 23 (1983).</em></p>
+
+<!-- Scan: printed listing -->
+<p align="center">
+  <img src="assets/CVG-program.png" alt="Caterpillar listing as printed in C&amp;VG" width="320">
+</p>
+<p align="center"><em>The Caterpillar type-in listing as printed. Full-resolution scans live in <a href="./assets/"><code>assets/</code></a>.</em></p>
 
 ## Play in the browser
 
