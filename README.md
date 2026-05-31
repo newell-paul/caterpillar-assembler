@@ -87,4 +87,4 @@ The full write-up is in [`43-years-later.md`](./43-years-later.md).
 
 ## Licence
 
-Original 1983 listing © Paul Newell, 1983. The 2026 rewrite is released under the MIT licence.
+Original 1983 listing © Paul Newell, 1983. The 2026 rewrite is released under the MIT licence; see [`LICENSE`](./LICENSE).

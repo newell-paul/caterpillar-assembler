@@ -16,6 +16,7 @@
 # Docs the repo ships
 !README.md
 !43-years-later.md
+!LICENSE
 
 # Keep this whitelist itself
 !.gitignore

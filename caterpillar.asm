@@ -1,5 +1,5 @@
 ; ======================================================================================
-; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.9.1
+; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.9.2
 ; Converted from BBC BASIC by Paul Newell with some assistance from Claude Code (c) 2026
 ; Game engine only - title/menu/scores handled by BASIC in MODE 7
 ; ======================================================================================
@@ -503,12 +503,8 @@ GUARD &3000
     BNE cal_done
     LDA cat_px_x
     LSR A : LSR A : LSR A
-    SEC
-    SBC acorn_target_col,X
-    CLC
-    ADC #1                      ; map -1→0, 0→1, 1→2
-    CMP #3
-    BCS cal_done                ; >= 3 means diff was < -1 or > 1
+    CMP acorn_target_col,X
+    BNE cal_done                ; must be exactly on the target column
     LDA acorn_word
     ORA acorn_bit_table,X
     STA acorn_word
