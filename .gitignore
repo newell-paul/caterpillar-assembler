@@ -1,11 +1,31 @@
-# Build output
-*.ssd
+# ── Whitelist repo: ignore everything, then re-include what we want ──
+*
 
-# Assembler binary
-beebasm
+# Source + build (the .ssd is rebuilt and committed)
+!caterpillar.asm
+!caterpillar.bas
+!caterpillar.asc
+!caterpillar.ssd
+!caterpillar-original.ssd
+!Makefile
+!*BOOT
 
-# Claude Code
-.claude/
+# Browser player (GitHub Pages entry point)
+!index.html
 
-# macOS
-.DS_Store
+# Docs the repo ships
+!README.md
+!43-years-later.md
+
+# Keep this whitelist itself
+!.gitignore
+
+# Assets: images only (not the 44MB cover PDF)
+!assets/
+assets/*
+!assets/*.png
+!assets/*.jpg
+!assets/*.jpeg
+!assets/*.gif
+!assets/README.md
+CLAUDE.md

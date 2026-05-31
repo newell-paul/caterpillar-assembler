@@ -56,6 +56,28 @@
       color: #fff;
     }
     .instructions p { margin: 0.5rem 0; }
+    .version-toggle {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .version-toggle button {
+      background: #2a2a44;
+      color: #ccc;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 0.4rem 0.9rem;
+      font: inherit;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .version-toggle button:hover { background: #353560; }
+    .version-toggle button.active {
+      background: #4a4a8a;
+      color: #fff;
+      border-color: #6a6ab0;
+    }
     .footer {
       margin-top: auto;
       padding: 1rem;
@@ -68,6 +90,11 @@
 <body>
   <h1>Caterpillar</h1>
   <p class="subtitle">BBC Micro &middot; Paul Newell &middot; 1983</p>
+
+  <div class="version-toggle">
+    <button id="btn-2026" class="active">2026 — Assembly rewrite</button>
+    <button id="btn-1983">1983 — Original BASIC</button>
+  </div>
 
   <div class="emulator-container">
     <iframe id="emulator" allow="autoplay" loading="eager"></iframe>
@@ -86,34 +113,47 @@
   <script>
     const iframe = document.getElementById('emulator');
     const loc = window.location;
+    const isLocal = loc.hostname === 'localhost' || loc.hostname === '127.0.0.1';
 
-    function loadEmulator(discParam) {
+    const DISCS = {
+      '2026': 'caterpillar.ssd',           // the assembly rewrite
+      '1983': 'caterpillar-original.ssd',  // the original BASIC listing
+    };
+
+    function bootDisc(discParam) {
       iframe.src = `https://bbc.xania.org/?disc=${discParam}&autoboot&embed`;
     }
 
-    if (loc.hostname === 'localhost' || loc.hostname === '127.0.0.1') {
-      // Local testing: fetch the SSD, base64-encode it, and pass via b64data: scheme
-      // (HTTPS jsbeeb cannot fetch from HTTP localhost, so we inline the data)
-      fetch('/caterpillar.ssd')
-        .then(r => r.arrayBuffer())
-        .then(buf => {
-          const bytes = new Uint8Array(buf);
-          let binary = '';
-          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-          const b64 = btoa(binary);
-          loadEmulator('b64data:' + b64);
-        });
-    } else if (loc.hostname.endsWith('.github.io')) {
-      // GitHub Pages: use raw.githubusercontent.com
-      const username = loc.hostname.replace('.github.io', '');
-      const repo = loc.pathname.split('/')[1] || '';
-      const discUrl = `https://raw.githubusercontent.com/${username}/${repo}/main/caterpillar.ssd`;
-      loadEmulator(encodeURIComponent(discUrl));
-    } else {
-      // Fallback: assume SSD is served alongside this page via HTTPS
-      const discUrl = new URL('caterpillar.ssd', loc.href).href;
-      loadEmulator(encodeURIComponent(discUrl));
+    function loadVersion(version) {
+      const file = DISCS[version];
+      if (isLocal) {
+        // HTTPS jsbeeb cannot fetch from HTTP localhost, so inline the disc as base64.
+        fetch('/' + file)
+          .then(r => r.arrayBuffer())
+          .then(buf => {
+            const bytes = new Uint8Array(buf);
+            let binary = '';
+            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+            bootDisc('b64data:' + btoa(binary));
+          });
+      } else {
+        // GitHub Pages (or any HTTPS host): the .ssd sits alongside this page.
+        bootDisc(encodeURIComponent(new URL(file, loc.href).href));
+      }
     }
+
+    const btn2026 = document.getElementById('btn-2026');
+    const btn1983 = document.getElementById('btn-1983');
+    function select(version, activeBtn, otherBtn) {
+      activeBtn.classList.add('active');
+      otherBtn.classList.remove('active');
+      loadVersion(version);
+    }
+    btn2026.addEventListener('click', () => select('2026', btn2026, btn1983));
+    btn1983.addEventListener('click', () => select('1983', btn1983, btn2026));
+
+    // Default to the 2026 rewrite.
+    loadVersion('2026');
   </script>
 </body>
 </html>
