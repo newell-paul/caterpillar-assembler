@@ -13,13 +13,9 @@ The original was published as a type-in listing in **Computer & Video Games** ma
 
 ## Play in the browser
 
-No download, no emulator install. Once this repo has GitHub Pages enabled, it plays instantly at:
+No download, no emulator install. Play instantly at:
 
-```
-https://<your-username>.github.io/caterpillar-assembler/
-```
-
-> Replace `<your-username>` with your GitHub account once the repo is pushed and Pages is turned on (Settings → Pages → deploy from the default branch).
+**https://newell-paul.github.io/caterpillar-assembler/**
 
 The page (`index.html`) embeds [jsbeeb](https://github.com/mattgodbolt/jsbeeb) and boots the
 committed `caterpillar.ssd` straight from the repo. Click the emulator, press any key to

@@ -127,5 +127,6 @@ Some things just take a little longer than expected 😄
 ## 🔗 Links
 
 - BBC Micro Archive (the 1983 original): https://www.bbcmicro.co.uk/game.php?id=1066
-- GitHub: [ADD YOUR LINK]
+- GitHub: https://github.com/newell-paul/caterpillar-assembler
+- Play in the browser: https://newell-paul.github.io/caterpillar-assembler/
 
