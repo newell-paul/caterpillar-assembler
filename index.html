@@ -29,15 +29,19 @@
     }
     .emulator-container {
       position: relative;
-      width: 921px;
-      max-width: 100%;
+      /* Fill the height left over after the heading/instructions, keeping the
+         921:733 aspect ratio. Capped at native size so it never upscales blurrily.
+         Page stays within the viewport (body is overflow:hidden) so keys reach
+         the game instead of scrolling the page. */
+      flex: 1 1 auto;
+      min-height: 0;
       aspect-ratio: 921 / 733;
-      /* Never let the emulator force the page taller than the viewport,
-         otherwise arrow/space keys scroll the page instead of reaching the game. */
-      max-height: 70vh;
+      max-width: 921px;
+      max-height: 733px;
+      width: auto;
     }
-    .emulator-container iframe { display: block; }
     .emulator-container iframe {
+      display: block;
       width: 100%;
       height: 100%;
       border: none;
