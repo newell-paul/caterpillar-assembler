@@ -1,5 +1,5 @@
 ; ======================================================================================
-; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.9.3
+; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.9.4
 ; Converted from BBC BASIC by Paul Newell with some assistance from Claude Code (c) 2026
 ; Game engine only - title/menu/scores handled by BASIC in MODE 7
 ; ======================================================================================
@@ -70,6 +70,12 @@ MOVE_ACCUM     = 164
 CAT_W          = 8
 MUSH_R_OFF     = 11
 ITEM_R_OFF     = 7
+
+; Bonus-round giant-letter geometry: 5 acorn columns, centred, 3-cell pitch (cols 4,7,10,13,16)
+ACORN_BOX_LEFT = 4              ; playfield col of the leftmost acorn column
+ACORN_BOX_PITCH = 3            ; cells between adjacent acorn columns (gives the horizontal gap)
+ACORN_ROW_PITCH = 4           ; draw_map_row steps between successive letter-rows (vertical gap)
+ACORN_LETTER_GAP = 26         ; blank rows between one finished letter and the next (tunable)
 
 BODY_MAX       = 5
 
@@ -231,10 +237,20 @@ GUARD &3000
     JSR load_season             ; load the real season map
     JMP after_scroll
 .load_bonus_map
-    LDA #LO(map_bonus) : STA map_ptr_lo : STA map_base_lo
-    LDA #HI(map_bonus) : STA map_ptr_hi : STA map_base_hi
-    LDA #0 : STA map_row_idx
-    LDA #64 : STA season_rows   ; 32 acorn + 32 empty
+    JSR setup_bonus_letters     ; build lit_list from acorn_word; A = lit_count
+    BNE lbm_have_letters
+    JMP show_completed          ; no ACORN letters lit -> skip the bonus entirely
+.lbm_have_letters
+    LDA #0
+    STA map_row_idx
+    STA bonus_letter : STA bonus_step : STA bonus_gap
+    LDX #23
+.lbm_clear_mask
+    STA acorn_mask,X            ; clear stale ring bits left over from the transition rows
+    DEX
+    BPL lbm_clear_mask
+    LDA #6 : STA bonus_subrow    ; rows emitted 6->0 so the letter scrolls in upright
+    LDA #250 : STA season_rows  ; high cap; real completion is driven by exhausting lit_list
     JMP after_scroll
 .bonus_complete
     JMP show_completed
@@ -483,6 +499,26 @@ GUARD &3000
     LDA #76 : STA season_rows   ; empty scrolling for transition
     RTS
 
+; Build lit_list: the ordered indices (0=A..4=N) of letters whose acorn_word bit is set.
+; Returns lit_count in A (and Z flag set when zero, for the caller's skip test).
+.setup_bonus_letters
+    LDX #0                      ; X = letter index 0..4
+    LDY #0                      ; Y = write position in lit_list
+.sbl_loop
+    LDA acorn_word
+    AND acorn_bit_table,X       ; is letter X lit?
+    BEQ sbl_skip
+    TXA
+    STA lit_list,Y              ; record this letter's index
+    INY
+.sbl_skip
+    INX
+    CPX #5
+    BNE sbl_loop
+    STY lit_count
+    TYA                         ; A = count, sets Z if zero
+    RTS
+
 .draw_season_name
     LDX season
     LDA bonus_phase
@@ -548,7 +584,7 @@ GUARD &3000
     STA item_col,X
 
     LDA transition_phase
-    BEQ dmr_has_items
+    BEQ dmr_not_transition
     LDA map_row_idx
     CMP #32
     BNE dmr_not_32
@@ -562,6 +598,10 @@ GUARD &3000
     JSR check_acorn_letter
 .dmr_skip_check
     JMP dmr_no_name
+.dmr_not_transition
+    LDA bonus_phase
+    BEQ dmr_has_items
+    JMP dmr_draw_bonus_letter   ; bonus round (post-transition): draw the next giant-letter row
 .dmr_has_items
 
     LDY #0
@@ -677,6 +717,84 @@ GUARD &3000
     LDA map_ptr_hi
     ADC #0
     STA map_ptr_hi
+    JMP dmr_no_name             ; normal path done -> scroll tail (do NOT fall into bonus draw)
+
+; Bonus round: emit one screen row of the giant falling letter, then fall through to the
+; shared scroll tail. State machine over bonus_gap / bonus_step / bonus_subrow:
+;   gap>0      -> blank separator row; when it expires, advance to the next lit letter
+;   step>0     -> blank vertical-pitch row inside the current letter
+;   step==0    -> draw letter-row bonus_subrow, then schedule the pitch/gap
+.dmr_draw_bonus_letter
+    LDX item_buf_wr
+    LDA #0
+    STA acorn_mask,X            ; default: no acorns on this row (blank)
+
+    LDA bonus_gap
+    BEQ ddbl_not_gap
+    DEC bonus_gap               ; counting down the gap between letters
+    BEQ ddbl_gap_expired
+    JMP ddbl_blank
+.ddbl_blank_near
+    JMP ddbl_blank              ; near trampoline so the branches above stay in range
+.ddbl_gap_expired
+    INC bonus_letter            ; gap done -> move to the next lit letter
+    LDA bonus_letter
+    CMP lit_count
+    BCC ddbl_blank_near         ; more letters -> first row of next letter is blank
+    JMP ddbl_finished           ; no more letters -> end the bonus round
+.ddbl_not_gap
+    LDA bonus_step
+    BEQ ddbl_draw_row
+    DEC bonus_step              ; blank vertical-pitch row
+    JMP ddbl_blank_near
+
+.ddbl_draw_row
+    ; point at the current letter's bitmap, fetch row bonus_subrow
+    LDX bonus_letter
+    LDA lit_list,X              ; A = letter index 0..4
+    TAX
+    LDA bonus_letter_ptr_lo,X : STA copy_ptr_lo
+    LDA bonus_letter_ptr_hi,X : STA copy_ptr_hi
+    LDY bonus_subrow
+    LDA (copy_ptr_lo),Y         ; A = 5-bit row mask
+    STA temp2                   ; temp2 = bits still to draw / record
+    LDX item_buf_wr
+    STA acorn_mask,X            ; collision: this row's acorn columns = the row mask exactly
+
+    LDA #0 : STA temp3          ; temp3 = slot index b (0..4)
+.ddbl_bit_loop
+    LSR temp2                   ; shift current bit into carry (bit0 first = leftmost)
+    BCC ddbl_bit_skip
+    LDX temp3
+    LDA acorn_slot_col,X
+    PHA                         ; column for the bottom cell (DRAWCELL clobbers A)
+    DRAWCELL 1, spr_acorn_top
+    PLA
+    DRAWCELL 2, spr_acorn_bottom
+.ddbl_bit_skip
+    INC temp3
+    LDA temp3
+    CMP #5
+    BNE ddbl_bit_loop
+
+    ; schedule the next row. bonus_subrow counts DOWN 6->0: the apex (subrow 0) is drawn
+    ; last so that after the screen scrolls down the letter reads the right way up.
+    LDA #ACORN_ROW_PITCH-1 : STA bonus_step
+    LDA bonus_subrow
+    BEQ ddbl_letter_done        ; just drew the top row (subrow 0) -> letter finished
+    DEC bonus_subrow
+    JMP ddbl_blank
+.ddbl_letter_done
+    LDA #6 : STA bonus_subrow    ; reset for the next letter
+    LDA #0 : STA bonus_step      ; gap supplies the blank rows from here
+    LDA #ACORN_LETTER_GAP : STA bonus_gap
+.ddbl_blank
+    JMP dmr_no_name
+
+.ddbl_finished
+    LDA season_rows
+    STA map_row_idx             ; force map_row_idx >= season_rows so the INC trips bonus_complete
+    JMP dmr_no_name
 
 .dmr_no_name
 
@@ -702,11 +820,63 @@ GUARD &3000
     JMP OSWRCH
 
 .proc_checkhit
+    LDA transition_phase
+    BNE pch_normal              ; during transitions use the normal (item_col) path
+    LDA bonus_phase
+    BNE pch_bonus               ; bonus round proper uses the per-row acorn-column mask
+.pch_normal
     LDX item_buf_rd
     LDA item_col,X
     CMP #&FF
     BNE pch_has_item
     RTS                         ; &FF = no item at this row
+
+; Bonus collision: the row at item_buf_rd may carry several acorns (one per set bit in
+; acorn_mask). The caterpillar is 8px = up to two cells wide; collect any acorn whose
+; column the caterpillar overlaps, clear that bit, and reuse the acorn erase+score path.
+.pch_bonus
+    LDX item_buf_rd
+    LDA acorn_mask,X
+    BNE pcb_has_acorns
+    RTS                         ; no acorns on this row
+.pcb_has_acorns
+    STA temp3                   ; temp3 = row mask
+    LDX #0                      ; X = slot index b (0..4)
+.pcb_loop
+    LDA slot_bit,X
+    AND temp3
+    BEQ pcb_next                ; this slot has no acorn
+    ; same pixel-overlap test the normal acorn path uses (item_col*8 vs cat_px_x)
+    LDA acorn_slot_col,X
+    ASL A : ASL A : ASL A       ; A = acorn_left_px = col * 8
+    STA temp0                   ; temp0 = acorn_left_px
+    CLC : ADC #ITEM_R_OFF
+    STA temp1                   ; temp1 = acorn_right_px
+    LDA cat_px_x
+    CLC : ADC #CAT_W-1          ; cat_right
+    CMP temp0
+    BCC pcb_next                ; cat_right < acorn_left -> miss this slot
+    LDA temp1                   ; acorn_right_px
+    CMP cat_px_x
+    BCS pcb_hit                 ; acorn_right >= cat_left -> overlap
+.pcb_next
+    INX
+    CPX #5
+    BNE pcb_loop
+    RTS                         ; caterpillar over no acorn this row
+.pcb_hit
+    ; clear this slot's bit so it can't be collected twice
+    LDA slot_bit,X
+    EOR #&FF
+    STA temp2                   ; temp2 = inverse mask
+    LDY item_buf_rd
+    LDA acorn_mask,Y
+    AND temp2
+    STA acorn_mask,Y
+    ; reuse the acorn erase + scoring path
+    LDA acorn_slot_col,X : STA pch_item_col
+    LDA #2 : STA pch_item_type
+    JMP pch_clear_sb
 .pch_has_item
     STA temp0                   ; item column (cell, left edge) - preserved for dispatch
     LDA item_type,X
@@ -772,10 +942,8 @@ GUARD &3000
     RTS
 .pch_acorn
     LDA acorn_score : CLC : ADC #10 : STA acorn_score
-    LDA #7 : LDX #LO(sound_hit5) : LDY #HI(sound_hit5)
-    JSR OSWORD                  ; note 1 of the sparkle
     LDA acorn_score             ; A = acorn points for the score add
-    LDX #LO(sound_hit5b) : LDY #HI(sound_hit5b) ; note 2, queued on same channel
+    LDX #LO(sound_hit5) : LDY #HI(sound_hit5) ; single flushed note (rapid acorns retrigger)
     JMP add_score_and_sound
 
 .add_score_and_sound
@@ -1153,6 +1321,16 @@ GUARD &3000
 .item_skip        EQUB 0        ; skip every Nth mushroom (0=none, 2=every 2nd, 3=every 3rd)
 .item_counter     EQUB 0        ; counts up, resets at item_skip
 
+; --- Bonus-round "spell ACORN in falling acorns" state (only used while bonus_phase=1) ---
+; Each lit letter is drawn as a 5-acorn-wide x 7-row mosaic, one letter at a time, with
+; gaps between acorns (3-cell column pitch, 4-row pitch) so the giant letter reads clearly.
+.lit_list         SKIP 5        ; ordered indices (0=A..4=N) of the letters the player lit
+.lit_count        EQUB 0        ; how many letters are in lit_list
+.bonus_letter     EQUB 0        ; index into lit_list of the letter currently falling
+.bonus_subrow     EQUB 0        ; which of the 7 letter-rows is being emitted next (0-6)
+.bonus_step       EQUB 0        ; sub-step counter within a letter-row (0=draw, 1-3=blank pitch)
+.bonus_gap        EQUB 0        ; blank-row countdown separating one letter from the next
+
 .save_buffer
     SKIP 32
 
@@ -1170,6 +1348,9 @@ GUARD &3000
     SKIP 24
 .item_type
     SKIP 24
+.acorn_mask
+    SKIP 24                      ; bonus only: per-row 5-bit mask of which acorn columns are present
+                                ; (bit b set => an acorn sits at playfield col ACORN_BOX_LEFT + b*3)
 
 .body_buf_addr_lo
 FOR i, 0, BODY_MAX - 1
@@ -1315,9 +1496,8 @@ NEXT
     EQUW 1, 1, 120, 4
 
 .sound_hit5
-    EQUW 1, 2, 120, 3
-.sound_hit5b
-    EQUW 1, 2, 180, 5
+    EQUW &11, 2, 120, 3         ; &11 = flush channel 1 first, so rapid bonus acorns retrigger
+                                ; instead of queueing (OSWORD 7 would otherwise BLOCK when full)
 
 .sound_tick
     EQUW 0, -2, 4, 1
@@ -1394,15 +1574,30 @@ NEXT
     EQUB 62, &22, 63, &10
     EQUB &FF
 
-.map_bonus
-    EQUB 0, &44, 2, &4D, 4, &48
-    EQUB 6, &42, 8, &4F, 10, &46
-    EQUB 12, &4B, 14, &43, 16, &50
-    EQUB 18, &49, 20, &45, 22, &4E
-    EQUB 24, &47, 26, &4C, 28, &41
-    EQUB 30, &51
-    EQUB 32, &4A, 34, &52, 36, &47, 38, &4E
-    EQUB &FF
+; Giant-letter bitmaps for the bonus round. 5 letters (A,C,O,R,N), 7 rows each.
+; Each row byte holds a 5-bit mask: bit b set => an acorn at playfield col 4 + b*3.
+; bit0 = leftmost column (4), bit4 = rightmost column (16). Shapes are drawn spaced
+; out so each acorn has clear air around it.
+.bonus_letter_rows
+.bl_A
+    EQUB %01110, %10001, %10001, %11111, %10001, %10001, %10001
+.bl_C
+    EQUB %01110, %10001, %00001, %00001, %00001, %10001, %01110
+.bl_O
+    EQUB %01110, %10001, %10001, %10001, %10001, %10001, %01110
+.bl_R
+    EQUB %01111, %10001, %10001, %01111, %00101, %01001, %10001
+.bl_N
+    EQUB %10001, %10011, %10101, %11001, %10001, %10001, %10001
+.bonus_letter_ptr_lo
+    EQUB LO(bl_A), LO(bl_C), LO(bl_O), LO(bl_R), LO(bl_N)
+.bonus_letter_ptr_hi
+    EQUB HI(bl_A), HI(bl_C), HI(bl_O), HI(bl_R), HI(bl_N)
+; Playfield column of each of the 5 acorn slots (= ACORN_BOX_LEFT + b*ACORN_BOX_PITCH).
+.acorn_slot_col
+    EQUB 4, 7, 10, 13, 16
+.slot_bit
+    EQUB 1, 2, 4, 8, 16         ; bit mask for each acorn slot (1<<b)
 
 .season_name_lo
     EQUB LO(str_autumn), LO(str_winter), LO(str_spring), LO(str_summer), LO(str_bonus)
