@@ -1,5 +1,5 @@
 ; ======================================================================================
-; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.9.2
+; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.9.3
 ; Converted from BBC BASIC by Paul Newell with some assistance from Claude Code (c) 2026
 ; Game engine only - title/menu/scores handled by BASIC in MODE 7
 ; ======================================================================================
@@ -269,15 +269,25 @@ GUARD &3000
 
 .round_over
     LDA acorn_score
+    CMP #240
+    BCS ro_bonus_hi
+    CMP #200
+    BCS ro_bonus_mid
     CMP #160
-    BNE ro_no_acorn_bonus
+    BCS ro_bonus_lo
+    JMP ro_no_acorn_bonus
+.ro_bonus_hi
+    LDA #LO(2000) : STA temp0 : LDA #HI(2000) : STA temp1
+    JMP ro_add_bonus
+.ro_bonus_mid
+    LDA #LO(1000) : STA temp0 : LDA #HI(1000) : STA temp1
+    JMP ro_add_bonus
+.ro_bonus_lo
+    LDA #LO(500) : STA temp0 : LDA #HI(500) : STA temp1
+.ro_add_bonus
     CLC
-    LDA score_lo
-    ADC #LO(2000)
-    STA score_lo
-    LDA score_hi
-    ADC #HI(2000)
-    STA score_hi
+    LDA score_lo : ADC temp0 : STA score_lo
+    LDA score_hi : ADC temp1 : STA score_hi
     LDA #7
     LDX #LO(sound_celebrate)
     LDY #HI(sound_celebrate)
@@ -692,10 +702,6 @@ GUARD &3000
     JMP OSWRCH
 
 .proc_checkhit
-    LDA collision_on
-    BNE pch_active
-    RTS
-.pch_active
     LDX item_buf_rd
     LDA item_col,X
     CMP #&FF
@@ -759,20 +765,23 @@ GUARD &3000
     PLA                         ; A = points
     JMP add_score_and_sound
 .pch_mushroom
+    LDA collision_on
+    BEQ pch_pass                ; C toggled off: pass through mushroom, pickups still score
     JMP proc_crash
+.pch_pass
+    RTS
 .pch_acorn
     LDA acorn_score : CLC : ADC #10 : STA acorn_score
-    LDX #LO(sound_hit5) : LDY #HI(sound_hit5)
+    LDA #7 : LDX #LO(sound_hit5) : LDY #HI(sound_hit5)
+    JSR OSWORD                  ; note 1 of the sparkle
+    LDA acorn_score             ; A = acorn points for the score add
+    LDX #LO(sound_hit5b) : LDY #HI(sound_hit5b) ; note 2, queued on same channel
     JMP add_score_and_sound
 
 .add_score_and_sound
     PHA                         ; save points
-    STX temp0 : STY temp1
-    JSR vsync_wait
-    JSR vsync_wait
-    LDX temp0 : LDY temp1
     LDA #7
-    JSR OSWORD                  ; X/Y restored
+    JSR OSWORD                  ; X/Y already hold sound block address
     PLA
     CLC
     ADC score_lo
@@ -1306,7 +1315,9 @@ NEXT
     EQUW 1, 1, 120, 4
 
 .sound_hit5
-    EQUW 1, 1, 30, 6
+    EQUW 1, 2, 120, 3
+.sound_hit5b
+    EQUW 1, 2, 180, 5
 
 .sound_tick
     EQUW 0, -2, 4, 1
