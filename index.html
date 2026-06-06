@@ -63,6 +63,19 @@
       color: #fff;
     }
     .instructions p { margin: 0.25rem 0; }
+    #fullscreen-btn {
+      background: #333;
+      border: 1px solid #555;
+      border-radius: 4px;
+      color: #fff;
+      font-size: 0.85rem;
+      padding: 0.25em 0.7em;
+      cursor: pointer;
+    }
+    #fullscreen-btn:hover { background: #444; }
+    /* Fullscreen cropping is applied via inline styles in JS (see applyFsStyles),
+       not CSS :fullscreen rules — inline styles always win and avoid any selector
+       or specificity issues that left the jsbeeb chrome/bezel visible. */
     .footer {
       padding: 0.25rem;
       font-size: 0.75rem;
@@ -75,11 +88,12 @@
   <h1>Caterpillar <span class="subtitle">&middot; BBC Micro &middot; Paul Newell &middot; 1983, rewritten in 6502 assembly 2026</span></h1>
 
   <div class="emulator-container">
-    <iframe id="emulator" allow="autoplay" loading="eager"></iframe>
+    <iframe id="emulator" allow="autoplay; fullscreen" allowfullscreen loading="eager"></iframe>
   </div>
 
   <div class="instructions">
     <p>Click the screen, then press any key to start. <kbd>Z</kbd> / <kbd>M</kbd> to move. Eat the fruit and acorns, avoid the mushrooms. <a href="https://github.com/mattgodbolt/jsbeeb">Powered by jsbeeb</a></p>
+    <p><button id="fullscreen-btn" type="button">⛶ Full screen</button> &middot; press <kbd>Esc</kbd> to exit</p>
   </div>
 
   <script>
@@ -95,6 +109,51 @@
       if (SCROLL_KEYS.has(e.key)) e.preventDefault();
     }, { passive: false });
     iframe.addEventListener('mouseenter', () => iframe.focus());
+
+    // Full screen: put the container into fullscreen (works with the cross-origin
+    // iframe), then focus the game so keypresses reach it rather than the page.
+    const container = document.querySelector('.emulator-container');
+    document.getElementById('fullscreen-btn').addEventListener('click', () => {
+      const req = container.requestFullscreen || container.webkitRequestFullscreen;
+      if (req) Promise.resolve(req.call(container)).then(() => iframe.focus()).catch(() => {});
+    });
+
+    // The jsbeeb chrome (top bar, LED panel, CRT bezel) is rendered INSIDE the
+    // cross-origin iframe, so CSS can't hide it. Instead, on entering fullscreen we
+    // oversize the iframe and clip it: the live BBC screen fills ~70% of the iframe,
+    // so sizing it to 70vh then scaling 1/0.70 lands the screen at exactly 100vh,
+    // pushing chrome and bezel outside the clipped container. Applied as inline
+    // styles (always win) and removed on exit so normal layout is restored.
+    // The live BBC screen fills the central ~70% of the iframe, so to make the
+    // screen fill the viewport we size the iframe to 1/0.70 = ~143% of the viewport
+    // height; the surrounding chrome/bezel then overflows the centred, clipping
+    // container. Pure sizing, no transform (transforms on aspect-ratio iframes were
+    // being ignored). The iframe's 921:733 ratio sets its width from that height.
+    const CROP = 0.70;
+    const OVER = (100 / CROP).toFixed(2);   // ~142.86
+    function applyFsStyles() {
+      const fs = document.fullscreenElement === container ||
+                 document.webkitFullscreenElement === container;
+      if (fs) {
+        Object.assign(container.style, {
+          width: '100vw', height: '100vh', aspectRatio: 'auto', display: 'flex',
+          alignItems: 'center', justifyContent: 'center', background: '#000',
+          overflow: 'hidden',
+        });
+        Object.assign(iframe.style, {
+          height: OVER + 'vh',
+          width: 'calc(' + OVER + 'vh * 921 / 733)',
+          maxWidth: 'none', maxHeight: 'none', aspectRatio: 'auto',
+          borderRadius: '0', transform: 'none', flex: '0 0 auto',
+        });
+        iframe.focus();
+      } else {
+        container.removeAttribute('style');
+        iframe.removeAttribute('style');
+      }
+    }
+    document.addEventListener('fullscreenchange', applyFsStyles);
+    document.addEventListener('webkitfullscreenchange', applyFsStyles);
 
     const DISC = 'caterpillar.ssd';   // the 2026 assembly rewrite
 
