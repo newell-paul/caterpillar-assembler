@@ -1,5 +1,5 @@
 ; ======================================================================================
-; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.9.3
+; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.9.4
 ; Converted from BBC BASIC by Paul Newell with some assistance from Claude Code (c) 2026
 ; Game engine only - title/menu/scores handled by BASIC in MODE 7
 ; ======================================================================================
@@ -176,8 +176,6 @@ GUARD &3000
     DEX
     BPL zi_loop2
     STA acorn_score
-    STA collision_key_prev
-    LDA #1 : STA collision_on
     LDA #2 : STA scroll_div : STA scroll_count ; initial scroll speed
     LDA #&FF : LDX #23
 .init_item_ring
@@ -244,21 +242,6 @@ GUARD &3000
     AND #3
     BNE skip_slow_path
 
-    LDX #(256-83)
-    JSR read_key
-    BNE ck_not_pressed
-    LDA collision_key_prev
-    BNE ck_done                 ; already held, don't toggle again
-    LDA collision_on
-    EOR #1
-    STA collision_on
-    LDA #1
-    STA collision_key_prev
-    JMP ck_done
-.ck_not_pressed
-    LDA #0
-    STA collision_key_prev
-.ck_done
     LDA #7
     LDX #LO(sound_tick)
     LDY #HI(sound_tick)
@@ -765,11 +748,7 @@ GUARD &3000
     PLA                         ; A = points
     JMP add_score_and_sound
 .pch_mushroom
-    LDA collision_on
-    BEQ pch_pass                ; C toggled off: pass through mushroom, pickups still score
     JMP proc_crash
-.pch_pass
-    RTS
 .pch_acorn
     LDA acorn_score : CLC : ADC #10 : STA acorn_score
     LDA #7 : LDX #LO(sound_hit5) : LDY #HI(sound_hit5)
@@ -1143,11 +1122,6 @@ GUARD &3000
     EQUB 22, 2, 23, 0, 10, 32, 0, 0, 0, 0, 0, 0, 5
 .vdu_row_clear                  ; VDU 28,0,30,19,30 + CLS + restore window
     EQUB 28, 0, 30, 19, 30, 12, 26
-
-.collision_on
-    EQUB 1                      ; 1=collision active, 0=disabled
-.collision_key_prev
-    EQUB 0                      ; previous C key state (for edge detection)
 
 .col_offset       EQUB 0        ; column offset for current season (0-19)
 .item_skip        EQUB 0        ; skip every Nth mushroom (0=none, 2=every 2nd, 3=every 3rd)

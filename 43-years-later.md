@@ -2,8 +2,10 @@
 
 In 1983, the first program I ever wrote appeared in the September issue of *Computer & Video Games* which was the pre-eminent UK games magazine of the day.
 
-![Computer & Video Games issue 23, September 1983](assets/CVG-cover.jpg)
-*Computer & Video Games issue 23, September 1983*
+<p align="center">
+  <img src="assets/CVG-cover.jpg" alt="Computer & Video Games issue 23, September 1983" width="500"><br>
+  <em>Computer & Video Games issue 23, September 1983</em>
+</p>
 
 Inside that issue, in the type-in listings section, was my game:
 
@@ -25,13 +27,17 @@ Back in the early 80s, publishing a game didn't mean uploading to GitHub or push
 
 It meant seeing your code printed across pages of a magazine and hoping someone, somewhere, would type it in correctly. And that was no easy feat, as anyone who ever tackled a multi-page listing will remember. One mistyped `DATA` statement and the whole thing fell over.
 
-![The Caterpillar type-in listing as printed in C&VG](assets/CVG-program.png)
-*The Caterpillar type-in listing as printed in C&VG*
+<p align="center">
+  <img src="assets/CVG-program.png" alt="The Caterpillar type-in listing as printed in C&VG" width="500"><br>
+  <em>The Caterpillar type-in listing as printed in C&VG</em>
+</p>
 
 The premise was simple: guide a caterpillar through a maze, collecting food and avoiding the poisonous mushrooms. About 110 lines of BASIC. It ran, it was playable-ish, and it was slow and I mean SLOW ...
 
-![The 1983 original in play — flat green mushrooms, all in BBC BASIC](assets/Screenshot-1983.png)
-*The 1983 original in play. Painfully slow in BBC BASIC*
+<p align="center">
+  <img src="assets/caterpillar-1983.gif" alt="The 1983 original in play — flat green mushrooms, all in BBC BASIC" width="500"><br>
+  <em>The 1983 original in play. Painfully slow in BBC BASIC</em>
+</p>
 
 ---
 
@@ -41,6 +47,7 @@ The BBC Micro Model B gave you 32K of RAM, a 2 MHz 6502, and not much else. The 
 
 - **BASIC was the bottleneck.** BBC BASIC was truly one of the best versions of the language but still pretty hopeless for action games.
 - **Performance.** Scrolling was very slow even using hardware calls. 
+- **Collision detection.** I remember struggling to get this right 
 
 ---
 
@@ -107,8 +114,16 @@ There's something uniquely satisfying about seeing old code come back to life.
 
 Not really modernised. Just finished, the way I always meant to write it.
 
-![The 2026 rewrite — the same game in native 6502, with proper multi-colour sprites](assets/Screenshot-2026.png)
-*The 2026 rewrite — the same game in native 6502, fast and fluid sprites*
+<p align="center">
+  <img src="assets/caterpillar-2026.gif" alt="The 2026 rewrite — the same game in native 6502, with proper multi-colour sprites" width="500"><br>
+  <em>The 2026 rewrite — the same game in native 6502, fast and fluid sprites</em>
+</p>
+
+---
+
+## 🏆 Score to beat
+
+**Will Newell — 3950**
 
 ---
 

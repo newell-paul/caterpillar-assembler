@@ -6,15 +6,15 @@ The original was published as a type-in listing in **Computer & Video Games** ma
 
 <!-- Scan: magazine cover -->
 <p align="center">
-  <img src="assets/CVG-cover.jpg" alt="C&amp;VG issue 23 cover" width="320">
+  <img src="assets/CVG-cover.jpg" alt="C&amp;VG issue 23 cover" width="500"><br>
+  <em>Computer &amp; Video Games, issue 23 (1983).</em>
 </p>
-<p align="center"><em>Computer &amp; Video Games, issue 23 (1983).</em></p>
 
 <!-- Scan: printed listing -->
 <p align="center">
-  <img src="assets/CVG-program.png" alt="Caterpillar listing as printed in C&amp;VG" width="320">
+  <img src="assets/CVG-program.png" alt="Caterpillar listing as printed in C&amp;VG" width="500"><br>
+  <em>The Caterpillar type-in listing as printed. Full-resolution scans live in <a href="./assets/"><code>assets/</code></a>.</em>
 </p>
-<p align="center"><em>The Caterpillar type-in listing as printed. Full-resolution scans live in <a href="./assets/"><code>assets/</code></a>.</em></p>
 
 ## Play in the browser
 
@@ -25,6 +25,12 @@ No download, no emulator install. Play instantly at:
 The page (`index.html`) embeds [jsbeeb](https://github.com/mattgodbolt/jsbeeb) and boots the
 committed `caterpillar.ssd` straight from the repo. Click the emulator, press any key to
 start, then **Z** / **M** to move left and right.
+
+## Score to beat
+
+**Will Newell — 3950**
+
+---
 
 ## The game
 
@@ -42,17 +48,17 @@ The season cycle is fully deterministic, with no system timer, so a given run pl
 identically every time. Difficulty ramps by varying
 mushroom density rather than speed.
 
-<!-- Screenshot: 1983 BASIC original -->
+<!-- Clip: 1983 BASIC original -->
 <p align="center">
-  <img src="assets/Screenshot-1983.png" alt="The 1983 BASIC version in play" width="480">
+  <img src="assets/caterpillar-1983.gif" alt="The 1983 BASIC version in play" width="500"><br>
+  <em>1983: the original BBC BASIC version. Flat, single-colour blocks drawn with VDU characters.</em>
 </p>
-<p align="center"><em>1983: the original BBC BASIC version. Flat, single-colour blocks drawn with VDU characters.</em></p>
 
-<!-- Screenshot: 2026 assembly rewrite -->
+<!-- Clip: 2026 assembly rewrite -->
 <p align="center">
-  <img src="assets/Screenshot-2026.png" alt="The 2026 assembly rewrite in play" width="480">
+  <img src="assets/caterpillar-2026.gif" alt="The 2026 assembly rewrite in play" width="500"><br>
+  <em>2026: the native 6502 rewrite. Multi-colour sprites, faster smoother scrolling, the same game 43 years on.</em>
 </p>
-<p align="center"><em>2026: the native 6502 rewrite. Multi-colour sprites, faster smoother scrolling, the same game 43 years on.</em></p>
 
 ## Build & run
 
