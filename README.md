@@ -18,11 +18,9 @@ The original was published as a type-in listing in **Computer & Video Games** ma
 
 ## Play in the browser
 
-No download, no emulator install. Play instantly:
+No download, no emulator install. Play instantly at:
 
-The page (`index.html`) runs [jsbeeb](https://github.com/mattgodbolt/jsbeeb) itself, bundled
-into `web/` (GPL-3.0) by `make web`, and boots the committed `caterpillar.ssd`. `make serve`
-serves it locally at http://localhost:8086/
+**https://newell-paul.github.io/caterpillar-assembler/**
 
 Press any key to start, then **Z** / **M** to move left and right. On a phone or tablet,
 tap ◀ or ▶ to start and hold them to move; turn it sideways for the biggest screen.
@@ -68,9 +66,17 @@ mushroom density rather than speed.
 
 ```bash
 make              # assemble caterpillar.ssd
-make run          # build, then open it in jsbeeb (localhost)
+make run          # build, then open it in a local jsbeeb
+make serve        # the browser page, at http://localhost:8086/
+make web          # rebuild web/, the page's emulator, from a jsbeeb checkout
 make clean        # remove the .ssd
 ```
+
+`make run` and `make web` need Node.js and a [jsbeeb](https://github.com/mattgodbolt/jsbeeb)
+checkout with `npm install` run, at `~/.local/share/jsbeeb` (set `JSBEEB_DIR` to use another).
+The browser page (`index.html`) runs jsbeeb itself, bundled into `web/` (GPL-3.0), and boots
+the committed `caterpillar.ssd`. Test it on a phone through the live link above: over plain
+HTTP to your machine's address the browser blocks the emulator's audio.
 
 The build uses [BeebASM](https://github.com/stardot/beebasm) (expected at `./beebasm`).
 Load the resulting `caterpillar.ssd` in [jsbeeb](https://bbc.godbolt.org),
