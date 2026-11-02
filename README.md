@@ -18,19 +18,17 @@ The original was published as a type-in listing in **Computer & Video Games** ma
 
 ## Play in the browser
 
-No download, no emulator install. Play instantly at:
+No download, no emulator install. Play instantly:
 
-**https://newell-paul.github.io/caterpillar-assembler/**
+The page (`index.html`) runs [jsbeeb](https://github.com/mattgodbolt/jsbeeb) itself, bundled
+into `web/` (GPL-3.0) by `make web`, and boots the committed `caterpillar.ssd`. `make serve`
+serves it locally at http://localhost:8086/
 
 Press any key to start, then **Z** / **M** to move left and right. On a phone or tablet,
 tap ◀ or ▶ to start and hold them to move; turn it sideways for the biggest screen.
 
 **Full screen:** the page's Full screen button (<kbd>Esc</kbd> to leave). On an iPhone,
 use Share → Add to Home Screen instead: it opens from there with no browser bars.
-
-The page (`index.html`) runs [jsbeeb](https://github.com/mattgodbolt/jsbeeb) itself, bundled
-into `web/` (GPL-3.0) by `make web`, and boots the committed `caterpillar.ssd`. `make serve`
-serves it locally at http://localhost:8086/.
 
 ## Score to beat
 
