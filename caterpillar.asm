@@ -1,5 +1,5 @@
 ; ======================================================================================
-; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.9.4
+; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.9.5
 ; Converted from BBC BASIC by Paul Newell with some assistance from Claude Code (c) 2026
 ; Game engine only - title/menu/scores handled by BASIC in MODE 7
 ; ======================================================================================
@@ -24,6 +24,16 @@ scroll_py     = &6C
 item_buf_wr    = &6D
 prev_scroll_py = &6E
 acorn_word  = &9C
+fine_y      = &7E               ; 0 or 4: scanlines the picture sits lower this frame (fine scroll)
+prev_fine   = &7F               ; fine_y when the head was last drawn
+cell_lo     = &88               ; erase_cell scratch (&88-&8E: past the 8-byte OSWORD block)
+cell_hi     = &89
+ec_dlo      = &8A
+ec_dhi      = &8B
+ec_sum      = &8C
+ec_end      = &8D
+seg_idx     = &8E
+vsync_seen  = &8F               ; MOS vsync counter (&240) at the start of this pass
 
 map_ptr_lo   = &70
 map_ptr_hi   = &71
@@ -73,6 +83,45 @@ ITEM_R_OFF     = 7
 
 BODY_MAX       = 5
 
+; ---------------------------------------------------------------------------------------
+; Fine scroll (build with -D FINE=0 to get the original 8px-every-2nd-frame scroll).
+; The MOS hardware scroll (VDU 11) moves the picture a whole character row: 8 scanlines.
+; With scroll_div = 2 that is an 8px jump every other frame. The 6845 can't start the
+; display part-way down a character row, but it CAN move the whole picture down against
+; vsync: the scanlines between vsync and the first displayed row are
+;     (R4 + 1 - R7) * 8 + R5      (R7 = 35: vsync position as the MOS sets MODE 2)
+; and the whole field is (R4 + 1) * 8 + R5 lines. The game alternates two settings:
+;     R4=37, R5=6: picture 30 lines after vsync, field 310 lines
+;     R4=38, R5=2: picture 34 lines after vsync, field 314 lines
+; The 34 setting is used on the frame before each coarse scroll: the picture drops 4 lines,
+; then the 8-line VDU 11 step lands with the 30 setting and finishes the move. So the
+; playfield moves 4px EVERY frame, and fields average 312 lines: exactly the old 50Hz.
+; The caterpillar head is drawn fine_y lines higher in memory on the dropped frames so it
+; stays still on the screen.
+;
+; WHEN to write matters. R4 and R5 are compared for equality as the 6845 counts: if R4 is
+; lowered after its row has started, or R5 lowered during the adjust lines, the counter
+; misses the match and runs on to its maximum (a field of hundreds of lines: the picture
+; rolls). Writing straight after vsync left only 1-2 rows of margin, and delays after the
+; MOS's own interrupt work were seen to eat it. So the values for the NEXT field are written
+; at the END of each pass, inside the displayed picture: User VIA timer 2 (started when the
+; pass begins, just after vsync) holds the write until the picture has started, and the
+; write is skipped if the pass ran past the next vsync (the MOS vsync counter at &240 has
+; changed). One misplaced frame is better than a rolling one.
+;
+; Measured in jsbeeb: playfield step 4px on every moving frame, mean field 312.6 lines,
+; gameplay events identical to the original. Field length still alternates by 4 lines:
+; fine on a CRT, untested on LCD TVs and scalers. Assumes scroll_div = 2 (all seasons).
+; ---------------------------------------------------------------------------------------
+FINE =? 1
+CRTC_ADDR = &FE00
+CRTC_DATA = &FE01
+UVIA_T2L  = &FE68                ; User VIA timer 2 (1MHz), unused by the MOS
+UVIA_T2H  = &FE69
+UVIA_IFR  = &FE6D
+FIELD_START_US = 2800            ; vsync to first displayed line is at most 2.2ms (34 lines)
+ASSERT FINE = 0 OR FINE = 1
+
 MACRO RINGINC idx, n
     LDX idx
     INX
@@ -92,7 +141,7 @@ MACRO DRAWCELL row, sprite
 ENDMACRO
 
 ORG &1900
-GUARD &3000
+GUARD &2800                     ; BASIC's PAGE: the engine must end below it
 
 .start
     TSX
@@ -188,6 +237,15 @@ GUARD &3000
 
 .game_loop
     JSR vsync_wait
+IF FINE
+    LDA &240 : STA vsync_seen   ; MOS vsync counter: lets the pass end spot an overrun
+    LDA #LO(FIELD_START_US) : STA UVIA_T2L
+    LDA #HI(FIELD_START_US) : STA UVIA_T2H  ; start T2 (also clears its IFR flag)
+    LDA scroll_count            ; 1 = this pass runs the coarse VDU 11, so this field
+    AND #1                      ; is the one dropped 4 lines (scroll_div = 2: 2,1,2,1...)
+    ASL A : ASL A
+    STA fine_y                  ; 0 or 4
+ENDIF
 
     INC anim_frame
 
@@ -248,6 +306,23 @@ GUARD &3000
     JSR OSWORD
 
 .skip_slow_path
+IF FINE
+    LDA #&20                    ; wait for T2: the next picture has started, so the 6845
+.gl_wait                        ; is past R4's last row and the R5 adjust lines
+    BIT UVIA_IFR
+    BEQ gl_wait
+    LDA &240                    ; still the same field? (no vsync since this pass began)
+    CMP vsync_seen
+    BNE gl_next                 ; overran: skip the write rather than risk a late one
+    LDA scroll_count            ; next pass: 1 -> R4=38,R5=2 (dropped)  2 -> R4=37,R5=6
+    AND #1
+    TAX                         ; X = 0 or 1
+    LDA #4 : STA CRTC_ADDR
+    TXA : CLC : ADC #37 : STA CRTC_DATA ; R4 = 37 or 38
+    LDA #5 : STA CRTC_ADDR
+    TXA : ASL A : ASL A : EOR #6 : STA CRTC_DATA  ; R5 = 6 or 2
+.gl_next
+ENDIF
     JMP game_loop
 
 .round_over
@@ -279,7 +354,7 @@ GUARD &3000
     LDA #1
     STA bonus_phase
     JSR enter_transition        ; show "Bonus", load empty map
-    JMP game_loop
+    JMP skip_slow_path          ; via the pass end, so the next field's CRTC values are set
 
 .proc_caterpillar
     CLC
@@ -298,11 +373,34 @@ GUARD &3000
     BNE pc_scroll
 
     LDA temp3
+IF FINE
+    BNE pc_restore
+    LDA fine_y                  ; not a movement frame, but the picture moved 4 lines:
+    CMP prev_fine               ; redraw the head (keys are NOT read: same gameplay)
+ENDIF
     BEQ pc_idle                 ; no scroll + no movement: nothing to do
+.pc_restore
+IF FINE
+    ; On the frame the picture drops 4 lines the whole body slides 4 lines further down,
+    ; so the tail would poke 4 lines past where the next erase leaves it. Restore the
+    ; oldest segment's bottom half now so the tail end stays put on screen.
+    LDA fine_y
+    BEQ pc_no_trim
+    LDA body_count
+    CMP #BODY_MAX
+    BCC pc_no_trim
+    LDY #4
+    JSR restore_oldest
+.pc_no_trim
+ENDIF
     LDA prev_scr_lo : STA scr_addr_lo
     LDA prev_scr_hi : STA scr_addr_hi
     LDA prev_scanline : STA temp0
     JSR restore_background
+IF FINE
+    LDA temp3
+    BEQ pc_draw_head
+ENDIF
     JMP pc_check_keys
 
 .pc_idle
@@ -347,9 +445,12 @@ GUARD &3000
     LDA scr_addr_hi : STA prev_scr_hi
     LDA temp0 : STA prev_scanline
     LDA scroll_py : STA prev_scroll_py
+IF FINE
+    LDA fine_y : STA prev_fine
+ENDIF
 
     JSR save_background
-    JSR proc_checkhit           ; check BEFORE drawing (reads save_buffer)
+    JSR proc_checkhit           ; check BEFORE drawing: a pickup repairs the screen and re-saves
     JSR prep_sprite_addr        ; recalc (save modifies scr_addr)
     JSR draw_sprite
     LDA #1
@@ -383,6 +484,17 @@ GUARD &3000
     RTS
 
 .erase_oldest_body
+    LDY #8                      ; restore all 8 lines of the oldest segment
+    JSR restore_oldest
+    RINGINC body_rdidx, BODY_MAX
+    DEC body_count
+    RTS
+
+; Copy the oldest segment's saved background back to the screen.
+; Y = number of lines to restore, counted up from the segment's bottom: 8 for the whole
+; segment, 4 for the tail trim (see trim_tail).
+.restore_oldest
+    STY temp1                   ; temp1 = lines to restore
     LDX body_rdidx
 
     LDA body_scr_lo,X
@@ -396,9 +508,15 @@ GUARD &3000
     STA copy_ptr_lo
     LDA body_buf_addr_hi,X
     STA copy_ptr_hi
+IF FINE
+.eob_skip                       ; step over the top 8-Y lines, which stay drawn
+    CPY #8
+    BEQ eob_row_loop
+    JSR eob_next_line
+    INY
+    BNE eob_skip                ; always taken
+ENDIF
 
-    LDA #8
-    STA temp1                   ; row counter
 .eob_row_loop
     LDY #0
     LDA (copy_ptr_lo),Y
@@ -415,21 +533,21 @@ GUARD &3000
     LDA (copy_ptr_lo),Y
     LDY #24
     STA (scr_addr_lo),Y
+    JSR eob_next_line
+    DEC temp1
+    BNE eob_row_loop
+    RTS
+
+; Next saved line (4 bytes on) and next screen scanline. Keeps Y.
+.eob_next_line
     CLC
     LDA copy_ptr_lo
     ADC #4
     STA copy_ptr_lo
-    BCC eob_no_ptr_wrap
+    BCC eob_nl_same
     INC copy_ptr_hi
-.eob_no_ptr_wrap
-    JSR advance_scanline
-    DEC temp1
-    BNE eob_row_loop
-
-    RINGINC body_rdidx, BODY_MAX
-
-    DEC body_count
-    RTS
+.eob_nl_same
+    JMP advance_scanline
 
 .load_season
     LDA season
@@ -663,6 +781,10 @@ GUARD &3000
 
 .dmr_no_name
 
+    ; Keep this slow windowed clear. Its delay is what makes the VDU 11 below change the
+    ; display start AFTER the next picture has begun, so the coarse step always shows one
+    ; field later. Fine scroll depends on that phase. Without it VDU 11 can land in the top
+    ; border and the MOS clear of the new top row loses the race with the beam (measured).
     LDX #LO(vdu_row_clear)
     LDY #HI(vdu_row_clear)
     LDA #7
@@ -685,6 +807,34 @@ GUARD &3000
     JMP OSWRCH
 
 .proc_checkhit
+IF FINE
+    ; On the half-step frame (fine_y = 4) the head is drawn 4 lines higher, so its top half
+    ; sits in the row ABOVE the head row. A mushroom cap there would be overlapped by 4 lines
+    ; with no hit, and that head is then left behind as the front body segment, 4 lines
+    ; inside the cap. So check the slot one row up (rd+1) too, mushrooms only: pickups
+    ; still wait for the head row, where the eaten cell is erased. On a hit, draw the head
+    ; back on the grid row (fine_y = 0), just under the cap, and freeze there.
+    LDA fine_y
+    BEQ pch_row24
+    LDX item_buf_rd
+    INX
+    CPX #24
+    BCC pch_up_ok
+    LDX #0                      ; ring wraps
+.pch_up_ok
+    LDA item_col,X
+    CMP #&FF
+    BEQ pch_row24               ; nothing in the row above (item_type may be stale)
+    LDY item_type,X
+    BNE pch_row24               ; fruit/acorn: not here
+    JSR item_overlap
+    BCC pch_row24
+    LDA #0 : STA fine_y
+    JSR prep_sprite_addr
+    JSR draw_sprite             ; head touching the underside of the cap
+    JMP proc_crash
+.pch_row24
+ENDIF
     LDX item_buf_rd
     LDA item_col,X
     CMP #&FF
@@ -692,31 +842,33 @@ GUARD &3000
     RTS                         ; &FF = no item at this row
 .pch_has_item
     STA temp0                   ; item column (cell, left edge) - preserved for dispatch
-    LDA item_type,X
-    STA temp1                   ; item type (0=mushroom, 1=item, 2=acorn) - preserved
+    LDY item_type,X
+    STY temp1                   ; item type (0=mushroom, 1=item, 2=acorn) - preserved
+    JSR item_overlap
+    BCS pch_hit
+    RTS
 
-    LDA temp0
+; A = item column (cell 0-19), Y = item type. Returns C=1 if the item's pixel span
+; [col*8, col*8 + R_OFF] overlaps the head's [cat_px_x, cat_px_x + CAT_W-1], else C=0.
+.item_overlap
     ASL A : ASL A : ASL A       ; item_left_px = item_col * 8
-    STA temp2                   ; temp2 = item_left_px
-    LDX temp1
-    BEQ pch_mush_width          ; type 0 = mushroom (two cells)
+    STA temp2
+    CPY #0
+    BEQ io_mush                 ; type 0 = mushroom (cap spans two cells)
     CLC : ADC #ITEM_R_OFF       ; fruit/acorn
-    JMP pch_have_right
-.pch_mush_width
-    CLC : ADC #MUSH_R_OFF       ; mushroom cap spans both cells
-.pch_have_right
+    BCC io_right                ; always: 152 + 11 can't wrap
+.io_mush
+    CLC : ADC #MUSH_R_OFF
+.io_right
     STA temp3                   ; temp3 = item_right_px
-
     LDA cat_px_x
     CLC : ADC #CAT_W-1          ; A = cat_right
-    CMP temp2                   ; cat_right vs item_left_px
-    BCS pch_test2               ; cat_right >= item_left → still possible
-    RTS                         ; cat_right < item_left → miss (near branch target)
-.pch_test2
-    LDA temp3                   ; item_right_px
-    CMP cat_px_x                ; item_right_px vs cat_left
-    BCS pch_hit                 ; item_right >= cat_left → overlap
-    RTS                         ; item_right < cat_left → miss
+    CMP temp2
+    BCC io_done                 ; cat_right < item_left: miss (C=0)
+    LDA temp3
+    CMP cat_px_x                ; C=1 if item_right >= cat_left
+.io_done
+    RTS
 .pch_hit
     LDX item_buf_rd
     LDA #&FF : STA item_col,X
@@ -724,16 +876,20 @@ GUARD &3000
     BEQ pch_mushroom            ; type 0 = cap → crash (skip erase)
     LDA temp0 : STA pch_item_col
     LDA temp1 : STA pch_item_type
-    LDA #0 : LDX #31
-.pch_clear_sb
-    STA save_buffer,X           ; save_buffer := 32 zero bytes (blank cell)
-    DEX
-    BPL pch_clear_sb
-    LDA pch_item_col : DRAWCELL 24, save_buffer ; black over the fruit's own cell
+    LDA pch_item_col : LDX #24
+    JSR erase_cell              ; black out the eaten item's cell
     LDA pch_item_type
     CMP #2
-    BNE pch_dispatch            ; type 1 (fruit) = single cell, done
-    LDA pch_item_col : DRAWCELL 25, save_buffer ; acorn: also clear bottom cell (row 25)
+    BNE pch_repair              ; type 1 (fruit) = single cell
+    LDA pch_item_col : LDX #25
+    JSR erase_cell              ; acorn: also its bottom cell (row 25)
+.pch_repair
+    ; The blank cell may have cut into the newest body segments (always for an acorn's
+    ; row 25; with fine scroll the body sits 4 lines off the cell grid). Repaint them, then
+    ; re-save the head's background so it holds the cleaned screen, not the eaten item.
+    JSR redraw_body
+    JSR prep_sprite_addr
+    JSR save_background
     LDA pch_item_type           ; A = item type for dispatch
 .pch_dispatch
     CMP #2
@@ -845,6 +1001,99 @@ GUARD &3000
     LDA #1
     STA game_result
     JMP return_to_basic
+
+; ---------------------------------------------------------------------------------------
+; Eating an item: erase_cell blanks it, redraw_body repairs the trail.
+; In MODE 2 one 8x8 character cell (4 byte-columns x 8 lines) is 32 CONTIGUOUS bytes, so a
+; byte at address a lies in the cell exactly when (a - cell base) < 32. erase_cell blanks
+; the cell, then scrubs those bytes out of the saved backgrounds of the newest 2 body
+; segments, so evicting a segment later can't paint the eaten item back. Only the newest
+; 2 segments can reach text rows 24-25 (head at 192-199, segments follow 8 lines apart).
+; ---------------------------------------------------------------------------------------
+.erase_cell                     ; A = text column, X = text row
+    JSR calc_item_addr
+    LDA scr_addr_lo : STA cell_lo
+    LDA scr_addr_hi : STA cell_hi
+    LDY #31
+    LDA #0
+.ec_blank
+    STA (scr_addr_lo),Y
+    DEY
+    BPL ec_blank
+    JSR newest_two              ; temp3 = segments to visit, X = body_wridx
+    BEQ ec_done
+.ec_seg
+    JSR seg_addr                ; X = next older segment; scr_addr/temp0 = where it is
+    STX seg_idx
+    TXA
+    ASL A : ASL A : ASL A : ASL A : ASL A
+    TAX                         ; X = segment * 32 = its buffer within body_save_base
+    CLC : ADC #32
+    STA ec_end
+.ec_line
+    SEC                         ; (this line's address - cell base), 16-bit
+    LDA scr_addr_lo : SBC cell_lo : STA ec_dlo
+    LDA scr_addr_hi : SBC cell_hi : STA ec_dhi
+    LDY #0                      ; Y = byte-column offset 0, 8, 16, 24
+.ec_col
+    TYA
+    CLC : ADC ec_dlo
+    STA ec_sum
+    LDA ec_dhi
+    ADC #0
+    BNE ec_keep                 ; 256+ bytes away (or below the cell base)
+    LDA ec_sum
+    CMP #32
+    BCS ec_keep                 ; outside the 32-byte cell
+    LDA #0
+    STA body_save_base,X        ; saved background byte := black
+.ec_keep
+    INX
+    TYA : CLC : ADC #8 : TAY
+    CPY #32
+    BNE ec_col
+    JSR advance_scanline
+    CPX ec_end
+    BNE ec_line
+    LDX seg_idx
+    DEC temp3
+    BNE ec_seg
+.ec_done
+    RTS
+
+.redraw_body                    ; repaint the newest 2 segments over the blanked cell(s)
+    JSR newest_two
+    BEQ rbd_done
+.rbd_seg
+    JSR seg_addr
+    STX seg_idx
+    JSR draw_sprite             ; a body segment is the head image left behind
+    LDX seg_idx
+    DEC temp3
+    BNE rbd_seg
+.rbd_done
+    RTS
+
+.newest_two                     ; temp3 = Y = min(body_count, 2), X = body_wridx, Z set if 0
+    LDX body_wridx
+    LDA body_count
+    CMP #3
+    BCC nt_set
+    LDA #2
+.nt_set
+    STA temp3
+    TAY                         ; sets Z from the count (STA leaves the CMP flags)
+    RTS
+
+.seg_addr                       ; X = previous ring slot; scr_addr/temp0 = its screen spot
+    DEX
+    BPL sa_ok
+    LDX #BODY_MAX-1
+.sa_ok
+    LDA body_scr_lo,X : STA scr_addr_lo
+    LDA body_scr_hi,X : STA scr_addr_hi
+    LDA body_scanln,X : STA temp0
+    RTS
 
 .do_colour
     PHA
@@ -987,6 +1236,10 @@ GUARD &3000
     SEC
     LDA cat_px_y
     SBC scroll_py
+IF FINE
+    SEC
+    SBC fine_y                  ; 4 lines higher in memory on dropped frames
+ENDIF
     STA temp2                   ; physical Y for calc_screen_addr
     JSR calc_screen_addr
     LDA temp2

@@ -5,7 +5,7 @@ OUT = caterpillar.ssd
 JSBEEB_DIR = $(HOME)/.local/share/jsbeeb
 JSBEEB_URL = http://localhost:5173/\?disc1=caterpillar.ssd\&autoboot
 
-.PHONY: all clean run
+.PHONY: all clean run serve web
 
 all: $(OUT)
 
@@ -19,6 +19,14 @@ run: $(OUT)
 		sleep 3; \
 	fi
 	@open $(JSBEEB_URL)
+
+# index.html as GitHub Pages serves it, at http://localhost:8086/
+serve: $(OUT)
+	python3 -m http.server 8086
+
+# web/: the page's emulator, bundled from jsbeeb
+web:
+	JSBEEB_DIR=$(JSBEEB_DIR) node tools/web/build.mjs
 
 clean:
 	rm -f $(OUT)
