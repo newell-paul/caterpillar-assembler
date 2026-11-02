@@ -12,6 +12,13 @@
 
 # Browser player (GitHub Pages entry point)
 !index.html
+!manifest.webmanifest
+!web/
+!web/**
+!tools/
+!tools/web/
+!tools/web/*.js
+!tools/web/*.mjs
 
 # Docs the repo ships
 !README.md
