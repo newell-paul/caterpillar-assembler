@@ -1,5 +1,5 @@
 ; ======================================================================================
-; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.9.5
+; Caterpillar - BBC Micro 6502 Assembly (MODE 7 BASIC wrapper version) v0.9.6
 ; Converted from BBC BASIC by Paul Newell with some assistance from Claude Code (c) 2026
 ; Game engine only - title/menu/scores handled by BASIC in MODE 7
 ; ======================================================================================
